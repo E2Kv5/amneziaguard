@@ -7,12 +7,17 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Applies the "no internet" (BLOCK) enforcement across the three tiers:
+ * Applies the "no internet" (BLOCK) enforcement and the kill-switch blackhole
+ * across the available tiers:
  *
- * 1. Root available + enabled → iptables owner-match DROP (works in any state).
- * 2. No root, tunnel down, block-when-disconnected → [GuardVpnService] blackhole.
- * 3. No root, tunnel up → BLOCK apps are already forced into the tunnel by the
- *    policy compiler; nothing extra to do here (documented limitation).
+ * - Kill-switch engaged (tunnel expected up but down) → [GuardVpnService] in
+ *   kill-switch mode: everyone except BYPASS apps is blackholed until the
+ *   tunnel is restored. This also covers BLOCK apps.
+ * - Root available + enabled → iptables owner-match DROP for BLOCK apps
+ *   (works in any tunnel state).
+ * - No root, tunnel down, block-when-disconnected → blackhole the BLOCK apps.
+ * - No root, tunnel up → BLOCK apps are already forced into the tunnel by the
+ *   policy compiler; nothing extra to do (documented limitation).
  */
 @Singleton
 class FirewallEnforcer @Inject constructor(
@@ -27,32 +32,37 @@ class FirewallEnforcer @Inject constructor(
     data class Inputs(
         val rules: Map<String, AppMode>,
         val tunnelActive: Boolean,
+        val killSwitchActive: Boolean,
         val rootModeEnabled: Boolean,
         val blockWhenDisconnected: Boolean,
     )
 
     suspend fun apply(inputs: Inputs) = mutex.withLock {
         val blocked = inputs.rules.filterValues { it == AppMode.BLOCK }.keys
+        val bypass = inputs.rules.filterValues { it == AppMode.BYPASS }.keys
+
+        // Highest priority: kill-switch fail-closed blackhole.
+        if (inputs.killSwitchActive) {
+            guardController.startKillSwitch(bypass)
+            blackholeActive = true
+            // Root block can stay applied underneath; it is harmless.
+            if (inputs.rootModeEnabled && rootController.isRootAvailable()) {
+                applyRootBlock(blocked)
+            }
+            return@withLock
+        }
 
         // Tier 1: root iptables — authoritative when available and enabled.
         if (inputs.rootModeEnabled && rootController.isRootAvailable()) {
             stopBlackhole()
-            val uids = installedApps.installedApps()
-                .filter { it.packageName in blocked }
-                .map { it.uid }
-                .toSet()
-            rootController.applyBlockedUids(uids)
-            rootActive = true
+            applyRootBlock(blocked)
             return@withLock
         }
-        if (rootActive) {
-            rootController.clear()
-            rootActive = false
-        }
+        clearRootBlock()
 
         // Tier 2: blackhole while the tunnel is down.
         if (!inputs.tunnelActive && inputs.blockWhenDisconnected && blocked.isNotEmpty()) {
-            guardController.start(blocked)
+            guardController.startBlocking(blocked)
             blackholeActive = true
         } else {
             stopBlackhole()
@@ -61,11 +71,24 @@ class FirewallEnforcer @Inject constructor(
     }
 
     suspend fun clearAll() = mutex.withLock {
+        clearRootBlock()
+        stopBlackhole()
+    }
+
+    private suspend fun applyRootBlock(blocked: Set<String>) {
+        val uids = installedApps.installedApps()
+            .filter { it.packageName in blocked }
+            .map { it.uid }
+            .toSet()
+        rootController.applyBlockedUids(uids)
+        rootActive = true
+    }
+
+    private suspend fun clearRootBlock() {
         if (rootActive) {
             rootController.clear()
             rootActive = false
         }
-        stopBlackhole()
     }
 
     private fun stopBlackhole() {

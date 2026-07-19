@@ -11,10 +11,19 @@ import javax.inject.Singleton
 class GuardController @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
-    fun start(packages: Set<String>) {
+    /** BLOCK mode: capture (blackhole) exactly these apps. */
+    fun startBlocking(packages: Set<String>) {
         val intent = Intent(context, GuardVpnService::class.java)
             .setAction(GuardVpnService.ACTION_START)
-            .putStringArrayListExtra(GuardVpnService.EXTRA_PACKAGES, ArrayList(packages))
+            .putStringArrayListExtra(GuardVpnService.EXTRA_ALLOWED, ArrayList(packages))
+        context.startService(intent)
+    }
+
+    /** Kill-switch mode: capture everyone except [exemptPackages]. */
+    fun startKillSwitch(exemptPackages: Set<String>) {
+        val intent = Intent(context, GuardVpnService::class.java)
+            .setAction(GuardVpnService.ACTION_START)
+            .putStringArrayListExtra(GuardVpnService.EXTRA_EXEMPT, ArrayList(exemptPackages))
         context.startService(intent)
     }
 

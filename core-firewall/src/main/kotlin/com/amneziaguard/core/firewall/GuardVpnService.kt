@@ -22,16 +22,23 @@ class GuardVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val packages = intent.getStringArrayListExtra(EXTRA_PACKAGES).orEmpty()
-                establish(packages)
+                val allowed = intent.getStringArrayListExtra(EXTRA_ALLOWED).orEmpty()
+                val exempt = intent.getStringArrayListExtra(EXTRA_EXEMPT).orEmpty()
+                establish(allowed, exempt)
             }
             ACTION_STOP -> stopBlackhole()
         }
         return START_STICKY
     }
 
-    private fun establish(packages: List<String>) {
-        if (packages.isEmpty()) {
+    /**
+     * Establishes a blackhole VPN. In BLOCK mode [allowed] apps are captured
+     * (everyone else is untouched). In kill-switch mode [exempt] apps are the
+     * only ones left with network (everyone else is captured). Exactly one list
+     * is non-empty — the VpnService.Builder cannot mix allow and disallow.
+     */
+    private fun establish(allowed: List<String>, exempt: List<String>) {
+        if (allowed.isEmpty() && exempt.isEmpty()) {
             stopBlackhole()
             return
         }
@@ -44,9 +51,8 @@ class GuardVpnService : VpnService() {
             .addRoute("::", 0)
             .addDnsServer("10.66.66.2")
             .setBlocking(true)
-        packages.forEach { pkg ->
-            runCatching { builder.addAllowedApplication(pkg) }
-        }
+        allowed.forEach { pkg -> runCatching { builder.addAllowedApplication(pkg) } }
+        exempt.forEach { pkg -> runCatching { builder.addDisallowedApplication(pkg) } }
         val descriptor = runCatching { builder.establish() }.getOrNull() ?: return
         pfd = descriptor
         drainThread = thread(name = "guard-drain", isDaemon = true) {
@@ -89,6 +95,7 @@ class GuardVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.amneziaguard.guard.START"
         const val ACTION_STOP = "com.amneziaguard.guard.STOP"
-        const val EXTRA_PACKAGES = "packages"
+        const val EXTRA_ALLOWED = "allowed"
+        const val EXTRA_EXEMPT = "exempt"
     }
 }
