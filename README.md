@@ -2,7 +2,7 @@
 
 Нативный Android VPN-клиент на протоколе **AmneziaWG 2.0** со встроенным пофайловым (per-app) фаерволом, kill-switch, защитой от DNS-утечек и плиткой в панели быстрых настроек (Quick Settings).
 
-> Разработано по [техническому заданию](amneziaguard_tz.md). Ядро туннеля — официальная userspace-реализация AmneziaWG (`amneziawg-go`), подключённая как готовый `.aar` c Maven Central; сборка из Go/NDK не требуется.
+> Ядро туннеля — официальная userspace-реализация AmneziaWG (`amneziawg-go`), подключённая как готовый `.aar` c Maven Central; сборка из Go/NDK не требуется.
 
 ## Возможности
 
