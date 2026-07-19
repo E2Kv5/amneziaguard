@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -30,6 +31,7 @@ import com.amneziaguard.core.data.model.Server
 @Composable
 fun ServersScreen(
     onImport: () -> Unit,
+    onEdit: (Long) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: ServersViewModel = hiltViewModel(),
 ) {
@@ -61,6 +63,7 @@ fun ServersScreen(
                         server = server,
                         active = server.id == state.activeServerId,
                         onSelect = { viewModel.selectServer(server.id) },
+                        onEdit = { onEdit(server.id) },
                         onDelete = { viewModel.delete(server.id) },
                     )
                     Spacer(Modifier.height(8.dp))
@@ -75,6 +78,7 @@ private fun ServerRow(
     server: Server,
     active: Boolean,
     onSelect: () -> Unit,
+    onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
     Card(onClick = onSelect, modifier = Modifier.fillMaxWidth()) {
@@ -99,6 +103,9 @@ private fun ServerRow(
                     tint = MaterialTheme.colorScheme.primary,
                 )
                 Spacer(Modifier.width(8.dp))
+            }
+            IconButton(onClick = onEdit) {
+                Icon(Icons.Default.Edit, contentDescription = "Edit")
             }
             IconButton(onClick = onDelete) {
                 Icon(Icons.Default.Delete, contentDescription = "Delete")

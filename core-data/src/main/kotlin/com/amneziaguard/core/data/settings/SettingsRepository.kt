@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.amneziaguard.core.data.model.AppMode
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -43,7 +44,13 @@ class SettingsRepository @Inject constructor(
         val leakCheckIntervalHours = intPreferencesKey("leak_check_interval_hours")
         val lastLeakCheckOk = booleanPreferencesKey("last_leak_check_ok")
         val lastLeakCheckAt = longPreferencesKey("last_leak_check_at")
+        val groupsSeeded = booleanPreferencesKey("groups_seeded")
     }
+
+    suspend fun isGroupsSeeded(): Boolean =
+        dataStore.data.first()[Keys.groupsSeeded] ?: false
+
+    suspend fun markGroupsSeeded() = dataStore.edit { it[Keys.groupsSeeded] = true }
 
     val settings: Flow<AppSettings> = dataStore.data.map { p ->
         AppSettings(

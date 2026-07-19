@@ -60,6 +60,12 @@ class ServerRepository @Inject constructor(
         serverDao.update(entity.copy(name = name))
     }
 
+    /** Replaces the (secret-free) conf body and name, keeping stored keys. */
+    suspend fun updateBody(id: Long, name: String, confBody: String, endpoint: String) {
+        val entity = serverDao.byId(id) ?: return
+        serverDao.update(entity.copy(name = name, confBody = confBody, endpoint = endpoint))
+    }
+
     suspend fun updateConf(
         id: Long,
         confBody: String,
