@@ -11,6 +11,11 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_STORE_PASSWORD: ${{ secrets.KEYSTORE_STORE_PASSWORD }}
+      KEYSTORE_KEY_ALIAS: ${{ secrets.KEYSTORE_KEY_ALIAS }}
+      KEYSTORE_KEY_PASSWORD: ${{ secrets.KEYSTORE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -24,14 +29,15 @@ jobs:
       # Signing is optional: if the KEYSTORE_BASE64 secret is set, the release
       # APK is signed; otherwise an unsigned release APK is produced.
       - name: Decode keystore
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        if: env.KEYSTORE_BASE64 != ''
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > keystore/amneziaguard-release.jks
+          mkdir -p keystore
+          echo "$KEYSTORE_BASE64" | base64 -d > keystore/amneziaguard-release.jks
           cat > keystore.properties <<EOF
           storeFile=keystore/amneziaguard-release.jks
-          storePassword=${{ secrets.KEYSTORE_STORE_PASSWORD }}
-          keyAlias=${{ secrets.KEYSTORE_KEY_ALIAS }}
-          keyPassword=${{ secrets.KEYSTORE_KEY_PASSWORD }}
+          storePassword=$KEYSTORE_STORE_PASSWORD
+          keyAlias=$KEYSTORE_KEY_ALIAS
+          keyPassword=$KEYSTORE_KEY_PASSWORD
           EOF
 
       - name: Build release APK
