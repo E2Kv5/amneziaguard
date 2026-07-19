@@ -10,3 +10,7 @@ captures/
 *.apk
 *.aab
 *.hprof
+# Signing — never commit keystores or their passwords
+keystore.properties
+*.jks
+*.keystore
