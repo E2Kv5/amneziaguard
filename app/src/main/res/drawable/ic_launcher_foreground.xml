@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Shield outline -->
+    <path
+        android:pathData="M54,24 L78,33 V54 C78,69 68,80 54,86 C40,80 30,69 30,54 V33 Z"
+        android:strokeColor="#FF7A00"
+        android:strokeWidth="5"
+        android:fillColor="#00000000"
+        android:strokeLineJoin="round" />
+    <!-- Keyhole dot -->
+    <path
+        android:pathData="M54,46 m-6,0 a6,6 0 1,1 12,0 a6,6 0 1,1 -12,0"
+        android:fillColor="#FF7A00" />
+    <path
+        android:pathData="M51,50 h6 l-1.5,14 h-3 Z"
+        android:fillColor="#FF7A00" />
+</vector>
