@@ -36,6 +36,7 @@ dependencies {
     implementation(project(":core-ui"))
     implementation(project(":core-data"))
     implementation(project(":core-tunnel"))
+    implementation(project(":background"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
