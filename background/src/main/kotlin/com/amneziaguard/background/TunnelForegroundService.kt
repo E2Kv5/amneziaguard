@@ -1,5 +1,6 @@
 package com.amneziaguard.background
 
+import android.app.Notification
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
@@ -26,8 +27,7 @@ class TunnelForegroundService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
-        startForeground(
-            TunnelNotifications.NOTIFICATION_ID,
+        startForegroundCompat(
             TunnelNotifications.build(this, "AmneziaGuard", "Starting…", showDisconnect = true),
         )
         orchestrator.state
@@ -75,14 +75,22 @@ class TunnelForegroundService : LifecycleService() {
                 return
             }
         }
-        val notification = TunnelNotifications.build(this, title, text, showDisconnect = true)
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-        } else {
-            0
-        }
-        if (type != 0) {
-            startForeground(TunnelNotifications.NOTIFICATION_ID, notification, type)
+        startForegroundCompat(TunnelNotifications.build(this, title, text, showDisconnect = true))
+    }
+
+    /**
+     * The 3-arg startForeground with a foregroundServiceType exists since API 29,
+     * and the specialUse type since API 34. Guarding the versioned call directly
+     * (rather than via a computed type int) keeps it correct on minSdk 26 and
+     * satisfies the NewApi lint check.
+     */
+    private fun startForegroundCompat(notification: Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                TunnelNotifications.NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
         } else {
             startForeground(TunnelNotifications.NOTIFICATION_ID, notification)
         }

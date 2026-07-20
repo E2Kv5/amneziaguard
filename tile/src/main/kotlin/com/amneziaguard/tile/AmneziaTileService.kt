@@ -3,6 +3,7 @@ package com.amneziaguard.tile
 import android.content.Intent
 import android.graphics.drawable.Icon
 import android.net.VpnService
+import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import com.amneziaguard.background.TunnelController
@@ -75,23 +76,16 @@ class AmneziaTileService : TileService() {
 
     private fun render(state: TunnelState) {
         val tile = qsTile ?: return
-        when (state) {
-            is TunnelState.Up -> {
-                tile.state = Tile.STATE_ACTIVE
-                tile.subtitle = "Connected"
-            }
-            TunnelState.Connecting -> {
-                tile.state = Tile.STATE_INACTIVE
-                tile.subtitle = "Connecting…"
-            }
-            TunnelState.Down -> {
-                tile.state = Tile.STATE_INACTIVE
-                tile.subtitle = "Disconnected"
-            }
-            is TunnelState.Error -> {
-                tile.state = Tile.STATE_UNAVAILABLE
-                tile.subtitle = "Error"
-            }
+        val (tileState, subtitle) = when (state) {
+            is TunnelState.Up -> Tile.STATE_ACTIVE to "Connected"
+            TunnelState.Connecting -> Tile.STATE_INACTIVE to "Connecting…"
+            TunnelState.Down -> Tile.STATE_INACTIVE to "Disconnected"
+            is TunnelState.Error -> Tile.STATE_UNAVAILABLE to "Error"
+        }
+        tile.state = tileState
+        // Tile.setSubtitle exists only since API 29; on 26-28 fall back to nothing.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            tile.subtitle = subtitle
         }
         tile.icon = Icon.createWithResource(this, R.drawable.ic_tile)
         tile.updateTile()
