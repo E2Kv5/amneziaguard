@@ -21,6 +21,7 @@ include(
     ":app",
     ":core-tunnel",
     ":core-firewall",
+    ":core-netstack",
     ":core-data",
     ":core-ui",
     ":feature-connect",
