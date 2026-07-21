@@ -1,5 +1,9 @@
 package com.amneziaguard.feature.settings
 
+import android.app.Activity
+import android.net.VpnService
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -9,20 +13,24 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 /**
- * Diagnostics screen for the no-root datapath spike. Runs amneziawg-go as a
- * local SOCKS5 and reports the exit IP seen through it.
+ * Diagnostics for the no-root datapath. Two probes:
+ *  - Plain spike: amneziawg-go SOCKS5 with bypass=0 (no VpnService).
+ *  - Protected spike: the same under our FilteringVpnService with bypass=1 +
+ *    protect(), which is what the real datapath will use.
  */
 @Composable
 fun SpikeScreen(
@@ -30,51 +38,78 @@ fun SpikeScreen(
     viewModel: SpikeViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val filteringLog by viewModel.filteringLog.collectAsStateWithLifecycle()
+    val filteringRunning by viewModel.filteringRunning.collectAsStateWithLifecycle()
+    val filteringExitIp by viewModel.filteringExitIp.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
-    Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
+    val consentLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) viewModel.startFilteringSpike()
+    }
+
+    fun launchFilteringSpike() {
+        val consent = VpnService.prepare(context)
+        if (consent != null) consentLauncher.launch(consent) else viewModel.startFilteringSpike()
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+    ) {
         Text("SOCKS5 datapath spike", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Starts amneziawg-go as a local SOCKS5 and fetches your exit IP through it. " +
-                "A VPN-server exit IP (not your ISP) confirms the obfuscated tunnel works via SOCKS5. " +
-                "Select an active server and keep the app's VPN disconnected while running — an " +
-                "active tunnel loops the proxy's socket (protection lands with the real datapath).",
+            "Plain: amneziawg-go SOCKS5 without a VpnService. Keep the app's VPN disconnected.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(12.dp))
-
-        Button(onClick = viewModel::run, enabled = !state.running) {
-            if (state.running) {
-                CircularProgressIndicator(
-                    modifier = Modifier.height(18.dp),
-                    strokeWidth = 2.dp,
-                )
-                Spacer(Modifier.height(0.dp))
-                Text("  Running…")
-            } else {
-                Text("Run spike")
-            }
-        }
-
+        Button(onClick = viewModel::run, enabled = !state.running) { Text("Run plain spike") }
         state.exitIp?.let {
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
             Text("Exit IP: $it", style = MaterialTheme.typography.titleMedium)
         }
+        LogBlock(state.log)
 
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        Text("Protected spike (VpnService)", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Runs amneziawg-go with bypass=1 + protect() under our own VpnService — the real " +
+                "datapath's setup. Grants a VPN permission prompt; only this app is captured.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Spacer(Modifier.height(12.dp))
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .verticalScroll(rememberScrollState()),
-        ) {
-            state.log.forEach { line ->
-                Text(
-                    line,
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                )
-            }
+        OutlinedButton(onClick = { launchFilteringSpike() }, enabled = !filteringRunning) {
+            Text("Run protected spike")
+        }
+        filteringExitIp?.let {
+            Spacer(Modifier.height(8.dp))
+            Text("Protected exit IP: $it", style = MaterialTheme.typography.titleMedium)
+        }
+        LogBlock(filteringLog)
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun LogBlock(lines: List<String>) {
+    if (lines.isEmpty()) return
+    Spacer(Modifier.height(8.dp))
+    Column(modifier = Modifier.fillMaxWidth()) {
+        lines.forEach { line ->
+            Text(
+                line,
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            )
         }
     }
 }

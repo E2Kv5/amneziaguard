@@ -15,6 +15,15 @@
                 android:value="vpn" />
         </service>
 
+        <service
+            android:name=".FilteringVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true"

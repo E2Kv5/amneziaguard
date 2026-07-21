@@ -2,6 +2,8 @@ package com.amneziaguard.feature.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.amneziaguard.background.FilteringController
+import com.amneziaguard.background.FilteringDiagnostics
 import com.amneziaguard.core.tunnel.ProxySpike
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,10 +22,18 @@ data class SpikeUiState(
 @HiltViewModel
 class SpikeViewModel @Inject constructor(
     private val proxySpike: ProxySpike,
+    private val filteringController: FilteringController,
+    filteringDiagnostics: FilteringDiagnostics,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(SpikeUiState())
     val state: StateFlow<SpikeUiState> = _state.asStateFlow()
+
+    // The protected (VpnService) spike runs inside FilteringVpnService and
+    // reports through the shared diagnostics holder.
+    val filteringLog: StateFlow<List<String>> = filteringDiagnostics.log
+    val filteringRunning: StateFlow<Boolean> = filteringDiagnostics.running
+    val filteringExitIp: StateFlow<String?> = filteringDiagnostics.exitIp
 
     fun run() {
         if (_state.value.running) return
@@ -35,4 +45,7 @@ class SpikeViewModel @Inject constructor(
             _state.update { it.copy(running = false, exitIp = outcome.exitIp) }
         }
     }
+
+    /** Called by the UI after VPN consent is granted. */
+    fun startFilteringSpike() = filteringController.start()
 }

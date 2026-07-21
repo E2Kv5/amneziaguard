@@ -1,15 +1,7 @@
 package com.amneziaguard.core.tunnel
 
-import com.amneziaguard.core.data.repo.ServerRepository
-import com.amneziaguard.core.data.settings.SettingsRepository
-import com.amneziaguard.core.netstack.socks.Socks5Client
-import com.amneziaguard.core.tunnel.model.AwgConfigModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
-import java.net.InetSocketAddress
-import java.net.Socket
 import javax.inject.Inject
 
 /**
@@ -21,21 +13,15 @@ import javax.inject.Inject
  */
 class ProxySpike @Inject constructor(
     private val proxyController: AmneziaProxyController,
-    private val serverRepository: ServerRepository,
-    private val settingsRepository: SettingsRepository,
+    private val configAssembler: ServerConfigAssembler,
 ) {
     data class Outcome(val success: Boolean, val exitIp: String?)
 
     suspend fun run(log: (String) -> Unit): Outcome = withContext(Dispatchers.IO) {
         try {
-            val serverId = settingsRepository.settings.first().activeServerId
-            if (serverId == null) {
-                log("No active server selected — pick one on the Servers screen first.")
-                return@withContext Outcome(false, null)
-            }
-            val confText = fullConfText(serverId)
+            val confText = configAssembler.activeServerConf()
             if (confText == null) {
-                log("Could not load config for server #$serverId.")
+                log("No active server / config — pick one on the Servers screen first.")
                 return@withContext Outcome(false, null)
             }
 
@@ -47,8 +33,8 @@ class ProxySpike @Inject constructor(
             }
             log("SOCKS5 up on 127.0.0.1:$port")
 
-            awaitPort(port, log)
-            val exitIp = fetchTrace(port, log)
+            TraceProbe.awaitPort(port)
+            val exitIp = TraceProbe.fetchExitIp(port, log)
             proxyController.stop()
             log("Proxy stopped.")
 
@@ -63,69 +49,6 @@ class ProxySpike @Inject constructor(
             log("Spike error: ${e.message}")
             runCatching { proxyController.stop() }
             Outcome(false, null)
-        }
-    }
-
-    private suspend fun fullConfText(serverId: Long): String? {
-        val body = serverRepository.confBody(serverId) ?: return null
-        val model = AwgConfigModel.parse(body).getOrNull() ?: return null
-        val psks = model.peers.indices.mapNotNull { i ->
-            serverRepository.presharedKey(serverId, i)?.let { i to it }
-        }.toMap()
-        return model.withSecrets(serverRepository.privateKey(serverId), psks).serialize()
-    }
-
-    private suspend fun awaitPort(port: Int, log: (String) -> Unit) {
-        repeat(20) { attempt ->
-            val ok = runCatching {
-                Socket().use { it.connect(InetSocketAddress("127.0.0.1", port), 300) }
-                true
-            }.getOrDefault(false)
-            if (ok) return
-            if (attempt == 0) log("Waiting for the SOCKS5 listener…")
-            delay(250)
-        }
-    }
-
-    /**
-     * SOCKS5-CONNECT to 1.1.1.1:443, TLS over the tunnelled socket, then
-     * GET /cdn-cgi/trace. Returns the `ip=` line (the exit IP). HTTPS is used
-     * because Cloudflare 301-redirects the plain-HTTP trace endpoint.
-     */
-    private fun fetchTrace(port: Int, log: (String) -> Unit): String? {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress("127.0.0.1", port), 5_000)
-            socket.soTimeout = 15_000
-
-            log("SOCKS5 CONNECT → 1.1.1.1:443")
-            Socks5Client.connect(
-                socket.getInputStream(),
-                socket.getOutputStream(),
-                destIp = byteArrayOf(1, 1, 1, 1),
-                destPort = 443,
-                credentials = Socks5Client.Credentials(
-                    AmneziaProxyController.SOCKS_USER,
-                    AmneziaProxyController.SOCKS_PASS,
-                ),
-            )
-
-            log("Tunnel established; TLS handshake + GET /cdn-cgi/trace")
-            val factory = javax.net.ssl.SSLSocketFactory.getDefault() as javax.net.ssl.SSLSocketFactory
-            val tls = factory.createSocket(socket, "one.one.one.one", 443, false) as javax.net.ssl.SSLSocket
-            tls.soTimeout = 15_000
-            tls.startHandshake()
-            tls.outputStream.write(
-                ("GET /cdn-cgi/trace HTTP/1.1\r\n" +
-                    "Host: one.one.one.one\r\n" +
-                    "User-Agent: AmneziaGuard-spike\r\n" +
-                    "Connection: close\r\n\r\n").toByteArray(),
-            )
-            tls.outputStream.flush()
-
-            val body = tls.inputStream.readBytes().toString(Charsets.UTF_8)
-            val ip = body.lineSequence().firstOrNull { it.startsWith("ip=") }?.removePrefix("ip=")?.trim()
-            if (ip == null) log("Response head: ${body.take(200)}")
-            return ip
         }
     }
 }
