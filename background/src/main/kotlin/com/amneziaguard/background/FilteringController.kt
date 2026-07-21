@@ -17,6 +17,12 @@ class FilteringController @Inject constructor(
         )
     }
 
+    fun startRelayTest() {
+        context.startService(
+            Intent(context, FilteringVpnService::class.java).setAction(FilteringVpnService.ACTION_RELAY_TEST),
+        )
+    }
+
     fun stop() {
         context.startService(
             Intent(context, FilteringVpnService::class.java).setAction(FilteringVpnService.ACTION_STOP),

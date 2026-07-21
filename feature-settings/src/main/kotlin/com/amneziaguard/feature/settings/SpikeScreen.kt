@@ -19,6 +19,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -43,15 +46,26 @@ fun SpikeScreen(
     val filteringExitIp by viewModel.filteringExitIp.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
+    var pendingRelayTest by remember { mutableStateOf(false) }
+
     val consentLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) viewModel.startFilteringSpike()
+        if (result.resultCode == Activity.RESULT_OK) {
+            if (pendingRelayTest) viewModel.startRelayTest() else viewModel.startFilteringSpike()
+        }
     }
 
     fun launchFilteringSpike() {
+        pendingRelayTest = false
         val consent = VpnService.prepare(context)
         if (consent != null) consentLauncher.launch(consent) else viewModel.startFilteringSpike()
+    }
+
+    fun launchRelayTest() {
+        pendingRelayTest = true
+        val consent = VpnService.prepare(context)
+        if (consent != null) consentLauncher.launch(consent) else viewModel.startRelayTest()
     }
 
     Column(
@@ -91,9 +105,28 @@ fun SpikeScreen(
         OutlinedButton(onClick = { launchFilteringSpike() }, enabled = !filteringRunning) {
             Text("Run protected spike")
         }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        Text("TCP relay test", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Runs the tun2socks TCP relay: captures this app, then opens a real connection to " +
+                "1.1.1.1 that flows tun → engine → SOCKS5 → tunnel. A VPN-server exit IP proves " +
+                "the relay carries a real TCP+TLS connection.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(onClick = { launchRelayTest() }, enabled = !filteringRunning) {
+            Text("Run TCP relay test")
+        }
+
         filteringExitIp?.let {
             Spacer(Modifier.height(8.dp))
-            Text("Protected exit IP: $it", style = MaterialTheme.typography.titleMedium)
+            Text("Exit IP (VpnService): $it", style = MaterialTheme.typography.titleMedium)
         }
         LogBlock(filteringLog)
         Spacer(Modifier.height(24.dp))

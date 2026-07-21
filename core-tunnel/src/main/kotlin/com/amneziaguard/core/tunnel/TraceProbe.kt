@@ -23,6 +23,32 @@ object TraceProbe {
         }
     }
 
+    /**
+     * Like [fetchExitIp] but connects a *real* socket straight to 1.1.1.1:443
+     * (no SOCKS5 handshake). Used to test the tun2socks engine: when this app
+     * is captured by our VpnService, this connection flows tun → engine →
+     * SOCKS5 → tunnel, so a VPN-server exit IP proves the TCP relay works.
+     */
+    fun fetchExitIpDirect(log: (String) -> Unit): String? {
+        Socket().use { socket ->
+            log("Direct socket → 1.1.1.1:443 (through the tun/engine)")
+            socket.connect(InetSocketAddress("1.1.1.1", 443), 15_000)
+            socket.soTimeout = 15_000
+            val factory = javax.net.ssl.SSLSocketFactory.getDefault() as javax.net.ssl.SSLSocketFactory
+            val tls = factory.createSocket(socket, "one.one.one.one", 443, false) as javax.net.ssl.SSLSocket
+            tls.soTimeout = 15_000
+            tls.startHandshake()
+            tls.outputStream.write(
+                ("GET /cdn-cgi/trace HTTP/1.1\r\n" +
+                    "Host: one.one.one.one\r\n" +
+                    "Connection: close\r\n\r\n").toByteArray(),
+            )
+            tls.outputStream.flush()
+            val body = tls.inputStream.readBytes().toString(Charsets.UTF_8)
+            return body.lineSequence().firstOrNull { it.startsWith("ip=") }?.removePrefix("ip=")?.trim()
+        }
+    }
+
     fun fetchExitIp(port: Int, log: (String) -> Unit): String? {
         Socket().use { socket ->
             socket.connect(InetSocketAddress("127.0.0.1", port), 5_000)

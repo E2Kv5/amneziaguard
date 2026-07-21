@@ -48,4 +48,6 @@ class SpikeViewModel @Inject constructor(
 
     /** Called by the UI after VPN consent is granted. */
     fun startFilteringSpike() = filteringController.start()
+
+    fun startRelayTest() = filteringController.startRelayTest()
 }

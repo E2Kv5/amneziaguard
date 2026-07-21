@@ -3,6 +3,9 @@ package com.amneziaguard.background
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import com.amneziaguard.core.netstack.RelayPolicy
+import com.amneziaguard.core.netstack.Tun2Socks
+import com.amneziaguard.core.netstack.socks.Socks5Client
 import com.amneziaguard.core.tunnel.AmneziaProxyController
 import com.amneziaguard.core.tunnel.ServerConfigAssembler
 import com.amneziaguard.core.tunnel.TraceProbe
@@ -14,6 +17,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.amnezia.awg.backend.SocketProtector
 import java.io.FileInputStream
+import java.io.FileOutputStream
 import javax.inject.Inject
 import kotlin.concurrent.thread
 
@@ -35,14 +39,17 @@ class FilteringVpnService : VpnService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var tun: ParcelFileDescriptor? = null
     private var drain: Thread? = null
+    @Volatile private var engine: Tun2Socks? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            teardown()
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                teardown()
+                stopSelf()
+            }
+            ACTION_RELAY_TEST -> scope.launch { runRelayTest() }
+            else -> scope.launch { runProtectedProbe() }
         }
-        scope.launch { runProtectedProbe() }
         return START_NOT_STICKY
     }
 
@@ -88,6 +95,64 @@ class FilteringVpnService : VpnService() {
         stopSelf()
     }
 
+    /**
+     * Milestone 2: exercise the tun2socks TCP relay. Capture this app, start
+     * amneziawg-go (bypass=1 + protect), run the engine, then open a *real*
+     * socket to 1.1.1.1:443 — it flows tun → engine → SOCKS5 → tunnel. A
+     * VPN-server exit IP proves the relay carries a real TCP+TLS connection.
+     */
+    private suspend fun runRelayTest() {
+        val log: (String) -> Unit = { diagnostics.append(it) }
+        diagnostics.reset()
+
+        val conf = configAssembler.activeServerConf()
+        if (conf == null) {
+            log("No active server / config."); diagnostics.finish(null); teardown(); stopSelf(); return
+        }
+        val fd = establishTun()
+        if (fd == null) {
+            log("establish() returned null (VPN not authorized?)."); diagnostics.finish(null); teardown(); stopSelf(); return
+        }
+        tun = fd
+        log("Tun up (this app captured); starting amneziawg-go bypass=1 + protect()…")
+
+        proxyController.setProtector(SocketProtector { socketFd -> if (protect(socketFd)) 1 else 0 })
+        val port = proxyController.start(conf, tunnelName = "awgrelay", bypass = 1).getOrElse {
+            log("Proxy failed to start: ${it.message}"); diagnostics.finish(null); teardown(); stopSelf(); return
+        }
+        TraceProbe.awaitPort(port)
+        log("SOCKS5 up on 127.0.0.1:$port; starting tun2socks relay…")
+
+        val relay = Tun2Socks(
+            tunIn = FileInputStream(fd.fileDescriptor),
+            tunOut = FileOutputStream(fd.fileDescriptor),
+            socksPort = port,
+            credentials = Socks5Client.Credentials(
+                AmneziaProxyController.SOCKS_USER,
+                AmneziaProxyController.SOCKS_PASS,
+            ),
+            mtu = 1280,
+            policy = { RelayPolicy.RELAY }, // relay everything for this test
+            log = log,
+        ).also { engine = it }
+        relay.start()
+
+        log("Probing exit IP through the relay…")
+        val ip = runCatching { TraceProbe.fetchExitIpDirect(log) }
+            .getOrElse { log("Probe error: ${it.message}"); null }
+
+        runCatching { relay.stop() }
+        runCatching { proxyController.stop() }
+        if (ip != null) {
+            log("SUCCESS — TCP relay works, exit IP $ip.")
+        } else {
+            log("No exit IP — relay likely incomplete; see logcat.")
+        }
+        diagnostics.finish(ip)
+        teardown()
+        stopSelf()
+    }
+
     private fun establishTun(): ParcelFileDescriptor? {
         val builder = Builder()
             .setSession("AmneziaGuard filter")
@@ -117,6 +182,8 @@ class FilteringVpnService : VpnService() {
     }
 
     private fun teardown() {
+        runCatching { engine?.stop() }
+        engine = null
         drain?.interrupt()
         drain = null
         runCatching { tun?.close() }
@@ -132,5 +199,6 @@ class FilteringVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.amneziaguard.filter.START"
         const val ACTION_STOP = "com.amneziaguard.filter.STOP"
+        const val ACTION_RELAY_TEST = "com.amneziaguard.filter.RELAY_TEST"
     }
 }
