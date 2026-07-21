@@ -37,7 +37,8 @@ fun SpikeScreen(
         Text(
             "Starts amneziawg-go as a local SOCKS5 and fetches your exit IP through it. " +
                 "A VPN-server exit IP (not your ISP) confirms the obfuscated tunnel works via SOCKS5. " +
-                "Select an active server first.",
+                "Select an active server and keep the app's VPN disconnected while running — an " +
+                "active tunnel loops the proxy's socket (protection lands with the real datapath).",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

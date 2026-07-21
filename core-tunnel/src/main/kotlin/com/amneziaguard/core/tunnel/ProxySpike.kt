@@ -87,35 +87,42 @@ class ProxySpike @Inject constructor(
         }
     }
 
-    /** SOCKS5-CONNECT to 1.1.1.1:80 and GET /cdn-cgi/trace; returns the ip= line. */
+    /**
+     * SOCKS5-CONNECT to 1.1.1.1:443, TLS over the tunnelled socket, then
+     * GET /cdn-cgi/trace. Returns the `ip=` line (the exit IP). HTTPS is used
+     * because Cloudflare 301-redirects the plain-HTTP trace endpoint.
+     */
     private fun fetchTrace(port: Int, log: (String) -> Unit): String? {
         Socket().use { socket ->
             socket.connect(InetSocketAddress("127.0.0.1", port), 5_000)
-            socket.soTimeout = 10_000
-            val input = socket.getInputStream()
-            val output = socket.getOutputStream()
+            socket.soTimeout = 15_000
 
-            log("SOCKS5 CONNECT → 1.1.1.1:80")
+            log("SOCKS5 CONNECT → 1.1.1.1:443")
             Socks5Client.connect(
-                input,
-                output,
+                socket.getInputStream(),
+                socket.getOutputStream(),
                 destIp = byteArrayOf(1, 1, 1, 1),
-                destPort = 80,
+                destPort = 443,
                 credentials = Socks5Client.Credentials(
                     AmneziaProxyController.SOCKS_USER,
                     AmneziaProxyController.SOCKS_PASS,
                 ),
             )
-            log("Tunnel established; requesting /cdn-cgi/trace")
-            output.write(
+
+            log("Tunnel established; TLS handshake + GET /cdn-cgi/trace")
+            val factory = javax.net.ssl.SSLSocketFactory.getDefault() as javax.net.ssl.SSLSocketFactory
+            val tls = factory.createSocket(socket, "one.one.one.one", 443, false) as javax.net.ssl.SSLSocket
+            tls.soTimeout = 15_000
+            tls.startHandshake()
+            tls.outputStream.write(
                 ("GET /cdn-cgi/trace HTTP/1.1\r\n" +
-                    "Host: 1.1.1.1\r\n" +
+                    "Host: one.one.one.one\r\n" +
                     "User-Agent: AmneziaGuard-spike\r\n" +
                     "Connection: close\r\n\r\n").toByteArray(),
             )
-            output.flush()
+            tls.outputStream.flush()
 
-            val body = input.readBytes().toString(Charsets.UTF_8)
+            val body = tls.inputStream.readBytes().toString(Charsets.UTF_8)
             val ip = body.lineSequence().firstOrNull { it.startsWith("ip=") }?.removePrefix("ip=")?.trim()
             if (ip == null) log("Response head: ${body.take(200)}")
             return ip
