@@ -42,6 +42,7 @@ class ProxySpike @Inject constructor(
             log("Starting amneziawg-go proxy…")
             val port = proxyController.start(confText).getOrElse {
                 log("Proxy failed to start: ${it.message}")
+                log("Details are in logcat (tags AwgProxy / AmneziaWG).")
                 return@withContext Outcome(false, null)
             }
             log("SOCKS5 up on 127.0.0.1:$port")
