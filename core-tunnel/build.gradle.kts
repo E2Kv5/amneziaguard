@@ -31,6 +31,7 @@ kotlin {
 dependencies {
     implementation(project(":core-data"))
     implementation(project(":core-firewall"))
+    implementation(project(":core-netstack"))
 
     api(libs.amneziawg)
     implementation(libs.androidx.core.ktx)

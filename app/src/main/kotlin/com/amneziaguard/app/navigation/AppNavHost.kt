@@ -13,6 +13,7 @@ import com.amneziaguard.feature.settings.ImportScreen
 import com.amneziaguard.feature.settings.SecurityScreen
 import com.amneziaguard.feature.settings.ServerEditScreen
 import com.amneziaguard.feature.settings.ServersScreen
+import com.amneziaguard.feature.settings.SpikeScreen
 
 /**
  * The navigation graph only. Scaffolding and window-inset handling live in
@@ -42,7 +43,10 @@ fun AppNavHost(
             )
         }
         composable(TopDestination.Security.route) {
-            SecurityScreen()
+            SecurityScreen(onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) })
+        }
+        composable(Routes.DIAGNOSTICS) {
+            SpikeScreen()
         }
         composable(Routes.IMPORT) {
             ImportScreen(onImported = { navController.popBackStack() })

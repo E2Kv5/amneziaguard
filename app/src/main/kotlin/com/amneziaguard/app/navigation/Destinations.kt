@@ -21,5 +21,6 @@ enum class TopDestination(
 object Routes {
     const val IMPORT = "import"
     const val SERVER_EDIT = "server_edit/{id}"
+    const val DIAGNOSTICS = "diagnostics"
     fun serverEdit(id: Long) = "server_edit/$id"
 }

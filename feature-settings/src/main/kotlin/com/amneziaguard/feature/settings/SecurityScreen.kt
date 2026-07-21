@@ -30,6 +30,7 @@ import java.util.Date
 
 @Composable
 fun SecurityScreen(
+    onOpenDiagnostics: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: SecurityViewModel = hiltViewModel(),
 ) {
@@ -104,6 +105,22 @@ fun SecurityScreen(
             }
         }) {
             Text("Open system VPN settings")
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        Text("Diagnostics", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "No-root datapath proof-of-concept (developer).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = onOpenDiagnostics) {
+            Text("SOCKS5 datapath spike")
         }
         Spacer(Modifier.height(24.dp))
     }
