@@ -7,10 +7,31 @@ package com.amneziaguard.core.netstack.packet
 object Checksums {
 
     /** Raw one's-complement sum over [length] bytes of [data] from [offset]. */
-    fun internetChecksum(data: ByteArray, offset: Int, length: Int): Int {
+    fun internetChecksum(data: ByteArray, offset: Int, length: Int): Int =
+        fold(sumWords(data, offset, length))
+
+    /**
+     * Unfolded one's-complement sum of the 16-bit words in [data].
+     *
+     * Consumes eight bytes per iteration rather than two: this runs over every
+     * payload byte the engine emits, so it is the datapath's hottest arithmetic.
+     * Adding wider chunks is safe because folding at the end is what reduces the
+     * sum mod 0xFFFF — a 64-bit accumulator cannot overflow for any buffer we
+     * could hold in memory (2^31 words of 2^32 still fits in 2^63).
+     */
+    private fun sumWords(data: ByteArray, offset: Int, length: Int): Long {
         var sum = 0L
         var i = offset
         val end = offset + length
+        val wide = end - 7
+        while (i < wide) {
+            val a = ((data[i].toInt() and 0xFF) shl 24) or ((data[i + 1].toInt() and 0xFF) shl 16) or
+                ((data[i + 2].toInt() and 0xFF) shl 8) or (data[i + 3].toInt() and 0xFF)
+            val b = ((data[i + 4].toInt() and 0xFF) shl 24) or ((data[i + 5].toInt() and 0xFF) shl 16) or
+                ((data[i + 6].toInt() and 0xFF) shl 8) or (data[i + 7].toInt() and 0xFF)
+            sum += (a.toLong() and 0xFFFFFFFFL) + (b.toLong() and 0xFFFFFFFFL)
+            i += 8
+        }
         while (i + 1 < end) {
             sum += ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
             i += 2
@@ -19,7 +40,7 @@ object Checksums {
             // Odd trailing byte is treated as the high byte of a 16-bit word.
             sum += (data[i].toInt() and 0xFF) shl 8
         }
-        return fold(sum)
+        return sum
     }
 
     /** IPv4 header checksum over the [ihl]*4 header bytes at [offset]. */
@@ -55,16 +76,7 @@ object Checksums {
         sum += addrWords(destIp)
         sum += protocol.toLong()
         sum += transportLength.toLong()
-
-        var i = transportOffset
-        val end = transportOffset + transportLength
-        while (i + 1 < end) {
-            sum += ((transport[i].toInt() and 0xFF) shl 8) or (transport[i + 1].toInt() and 0xFF)
-            i += 2
-        }
-        if (i < end) {
-            sum += (transport[i].toInt() and 0xFF) shl 8
-        }
+        sum += sumWords(transport, transportOffset, transportLength)
         return fold(sum)
     }
 

@@ -32,7 +32,7 @@ class Socks5UdpRelay(
     private val mtu: Int,
     private val writeToTun: (ByteArray) -> Unit,
 ) {
-    private val associations = ConcurrentHashMap<String, Association>()
+    private val associations = ConcurrentHashMap<Long, Association>()
     private val reaper = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "udp-reaper").apply { isDaemon = true }
     }
@@ -46,9 +46,12 @@ class Socks5UdpRelay(
     /** Sends one datagram from an app; returns false if the association failed. */
     fun send(flow: FlowKey, payload: ByteArray): Boolean {
         if (!running) return false
-        val key = "${Tun2Socks.ip(flow.sourceIp)}:${flow.sourcePort}"
+        // Only IPv4 reaches the relay (the read loop drops v6 before dispatch),
+        // so the source address packs into the key; anything else would collide.
+        if (flow.sourceIp.size != 4) return false
+        val key = associationKey(flow.sourceIp, flow.sourcePort)
         val association = associations.getOrPut(key) {
-            Association(flow.sourceIp, flow.sourcePort, key).also {
+            Association(flow.sourceIp, flow.sourcePort).also {
                 if (!it.open()) {
                     associations.remove(key)
                     return false
@@ -56,6 +59,17 @@ class Socks5UdpRelay(
             }
         }
         return association.send(flow.destIp, flow.destPort, payload)
+    }
+
+    /**
+     * Source ip:port packed into a long. This runs per datagram, and formatting
+     * a dotted-quad string here cost more than every other per-datagram step in
+     * the relay combined.
+     */
+    private fun associationKey(sourceIp: ByteArray, sourcePort: Int): Long {
+        val ip = ((sourceIp[0].toLong() and 0xFF) shl 24) or ((sourceIp[1].toLong() and 0xFF) shl 16) or
+            ((sourceIp[2].toLong() and 0xFF) shl 8) or (sourceIp[3].toLong() and 0xFF)
+        return (ip shl 16) or sourcePort.toLong()
     }
 
     fun stop() {
@@ -75,8 +89,10 @@ class Socks5UdpRelay(
     private inner class Association(
         private val appIp: ByteArray,
         private val appPort: Int,
-        private val key: String,
     ) {
+        /** Human-readable only, for logs — built once, never per datagram. */
+        private val key = "${Tun2Socks.ip(appIp)}:$appPort"
+
         @Volatile var lastUsed = System.currentTimeMillis()
         private var control: Socket? = null
         private var udp: DatagramSocket? = null
@@ -114,7 +130,7 @@ class Socks5UdpRelay(
             val socket = udp ?: return false
             val target = relay ?: return false
             return try {
-                val framed = header(destIp, destPort) + payload
+                val framed = frame(destIp, destPort, payload)
                 socket.send(DatagramPacket(framed, framed.size, target))
                 lastUsed = System.currentTimeMillis()
                 true
@@ -125,11 +141,20 @@ class Socks5UdpRelay(
             }
         }
 
-        /** RFC 1928 §7: RSV(2) FRAG(1) ATYP(1) DST.ADDR DST.PORT. */
-        private fun header(destIp: ByteArray, destPort: Int): ByteArray {
-            val atyp = if (destIp.size == 16) ATYP_IPV6 else ATYP_IPV4
-            return byteArrayOf(0, 0, 0, atyp.toByte()) + destIp +
-                byteArrayOf((destPort shr 8).toByte(), destPort.toByte())
+        /**
+         * RFC 1928 §7: RSV(2) FRAG(1) ATYP(1) DST.ADDR DST.PORT, then the
+         * datagram — written into one buffer, since building the header from
+         * concatenated arrays allocated four of them per datagram.
+         */
+        private fun frame(destIp: ByteArray, destPort: Int, payload: ByteArray): ByteArray {
+            val framed = ByteArray(4 + destIp.size + 2 + payload.size)
+            framed[3] = (if (destIp.size == 16) ATYP_IPV6 else ATYP_IPV4).toByte()
+            destIp.copyInto(framed, 4)
+            val port = 4 + destIp.size
+            framed[port] = (destPort shr 8).toByte()
+            framed[port + 1] = destPort.toByte()
+            payload.copyInto(framed, port + 2)
+            return framed
         }
 
         private fun pumpReplies() {
