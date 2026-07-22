@@ -17,9 +17,9 @@ import javax.inject.Singleton
  * datapath — the piece that finally makes the BLOCK mode work without root
  * *while the tunnel is up*.
  *
- * The owning UID comes from `ConnectivityManager.getConnectionOwnerUid`, which
- * needs API 29+. Below that the owner is unknowable from inside a VpnService,
- * so flows fall back to the default mode (blocking then still needs root).
+ * The owning UID comes from `ConnectivityManager.getConnectionOwnerUid`. A flow
+ * whose owner can't be determined (a kernel-originated probe, say) falls back to
+ * the default mode rather than being dropped.
  */
 @Singleton
 class UidPolicyResolver @Inject constructor(

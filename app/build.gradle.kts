@@ -23,7 +23,7 @@ android {
 
     defaultConfig {
         applicationId = "com.amneziaguard.app"
-        minSdk = 26
+        minSdk = 29
         targetSdk = 36
         versionCode = 6
         versionName = "0.2.2"

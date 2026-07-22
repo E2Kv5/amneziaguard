@@ -12,7 +12,7 @@ Android allows only one active VPN, and the current design can't do this:
 There is no new Android 14/15/16 API for third-party per-app blocking. The only no-root
 mechanism is `ConnectivityManager.getConnectionOwnerUid()` (API 29+, Android 10), which maps a
 connection 5-tuple to the owning app's UID — but it only helps if **we** own the tun and process
-packets ourselves. This is exactly how RethinkDNS (firestack) does no-root per-app firewall while
+packets ourselves. This is why the app's minSdk is 29: below that the feature cannot exist. This is exactly how RethinkDNS (firestack) does no-root per-app firewall while
 tunnelling.
 
 ## Why not just use firestack

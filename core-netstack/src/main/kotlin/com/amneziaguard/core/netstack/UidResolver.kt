@@ -2,7 +2,6 @@ package com.amneziaguard.core.netstack
 
 import android.content.Context
 import android.net.ConnectivityManager
-import android.os.Build
 import androidx.core.content.getSystemService
 import com.amneziaguard.core.netstack.packet.FlowKey
 import com.amneziaguard.core.netstack.packet.IpProtocol
@@ -16,18 +15,15 @@ interface UidResolver {
 }
 
 /**
- * Android implementation backed by [ConnectivityManager.getConnectionOwnerUid]
- * (API 29+). This is the no-root mechanism for per-app filtering inside a
- * VpnService — the VpnService owns the captured connections, so it may query
- * their owning UID. On API 26-28 there is no equivalent, so it returns unknown
- * and the caller falls back to the default policy.
+ * Android implementation backed by [ConnectivityManager.getConnectionOwnerUid].
+ * This is the no-root mechanism for per-app filtering inside a VpnService — the
+ * VpnService owns the captured connections, so it may query their owning UID.
  */
 class ConnectivityUidResolver(context: Context) : UidResolver {
 
     private val connectivityManager = context.getSystemService<ConnectivityManager>()
 
     override fun uidFor(flow: FlowKey): Int {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return INVALID_UID
         val cm = connectivityManager ?: return INVALID_UID
         val protocol = when (flow.protocol) {
             IpProtocol.TCP -> IPPROTO_TCP

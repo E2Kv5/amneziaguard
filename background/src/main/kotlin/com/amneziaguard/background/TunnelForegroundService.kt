@@ -79,10 +79,9 @@ class TunnelForegroundService : LifecycleService() {
     }
 
     /**
-     * The 3-arg startForeground with a foregroundServiceType exists since API 29,
-     * and the specialUse type since API 34. Guarding the versioned call directly
-     * (rather than via a computed type int) keeps it correct on minSdk 26 and
-     * satisfies the NewApi lint check.
+     * The specialUse foreground-service type only exists since API 34, so the
+     * versioned call is guarded directly (rather than via a computed type int),
+     * which also satisfies the NewApi lint check.
      */
     private fun startForegroundCompat(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {

@@ -157,11 +157,6 @@ class FilteringVpnService : VpnService() {
         log("Rules: default=${settings.defaultAppMode}, $blocked blocked, " +
             "${appPolicy.included.size} included, ${appPolicy.excluded.size} bypassed")
 
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            log("Note: per-app blocking needs Android 10+ (connection owner lookup); " +
-                "flows will follow the default mode on this device.")
-        }
-
         val fd = establishTun(appPolicy.included, appPolicy.excluded)
         if (fd == null) {
             log("establish() returned null (VPN not authorized?).")

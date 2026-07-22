@@ -83,10 +83,7 @@ class AmneziaTileService : TileService() {
             is TunnelState.Error -> Tile.STATE_UNAVAILABLE to "Error"
         }
         tile.state = tileState
-        // Tile.setSubtitle exists only since API 29; on 26-28 fall back to nothing.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            tile.subtitle = subtitle
-        }
+        tile.subtitle = subtitle
         tile.icon = Icon.createWithResource(this, R.drawable.ic_tile)
         tile.updateTile()
     }

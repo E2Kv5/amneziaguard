@@ -16,7 +16,9 @@
 
 ## Стек
 
-Kotlin · Jetpack Compose + Material 3 · `VpnService` · Hilt · Room · DataStore · WorkManager · Navigation Compose. **minSdk 26**, compile/target SDK 36, JDK 17.
+Kotlin · Jetpack Compose + Material 3 · `VpnService` · Hilt · Room · DataStore · WorkManager · Navigation Compose. **minSdk 29 (Android 10)**, compile/target SDK 36, JDK 17.
+
+> Android 10 — минимум осознанно: пофайловая блокировка без root опирается на `ConnectivityManager.getConnectionOwnerUid`, который появился именно в API 29. На более старых версиях эта функция не работала бы вовсе.
 
 Ядро туннеля: [`com.zaneschepke:amneziawg-android`](https://central.sonatype.com/artifact/com.zaneschepke/amneziawg-android) (форк официального `amnezia-vpn/amneziawg-android`).
 
