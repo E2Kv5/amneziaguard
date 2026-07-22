@@ -50,4 +50,8 @@ class SpikeViewModel @Inject constructor(
     fun startFilteringSpike() = filteringController.start()
 
     fun startRelayTest() = filteringController.startRelayTest()
+
+    fun startFirewallEngine() = filteringController.startFirewall()
+
+    fun stopFirewallEngine() = filteringController.stop()
 }

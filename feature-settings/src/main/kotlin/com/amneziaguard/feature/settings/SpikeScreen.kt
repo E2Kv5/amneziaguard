@@ -4,7 +4,9 @@ import android.app.Activity
 import android.net.VpnService
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,27 +48,34 @@ fun SpikeScreen(
     val filteringExitIp by viewModel.filteringExitIp.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    var pendingRelayTest by remember { mutableStateOf(false) }
+    var pending by remember { mutableStateOf(Pending.SPIKE) }
 
     val consentLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            if (pendingRelayTest) viewModel.startRelayTest() else viewModel.startFilteringSpike()
+            when (pending) {
+                Pending.SPIKE -> viewModel.startFilteringSpike()
+                Pending.RELAY -> viewModel.startRelayTest()
+                Pending.FIREWALL -> viewModel.startFirewallEngine()
+            }
         }
     }
 
-    fun launchFilteringSpike() {
-        pendingRelayTest = false
+    fun launch(what: Pending) {
+        pending = what
         val consent = VpnService.prepare(context)
-        if (consent != null) consentLauncher.launch(consent) else viewModel.startFilteringSpike()
+        if (consent != null) {
+            consentLauncher.launch(consent)
+        } else {
+            when (what) {
+                Pending.SPIKE -> viewModel.startFilteringSpike()
+                Pending.RELAY -> viewModel.startRelayTest()
+                Pending.FIREWALL -> viewModel.startFirewallEngine()
+            }
+        }
     }
 
-    fun launchRelayTest() {
-        pendingRelayTest = true
-        val consent = VpnService.prepare(context)
-        if (consent != null) consentLauncher.launch(consent) else viewModel.startRelayTest()
-    }
 
     Column(
         modifier = modifier
@@ -102,7 +111,7 @@ fun SpikeScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = { launchFilteringSpike() }, enabled = !filteringRunning) {
+        OutlinedButton(onClick = { launch(Pending.SPIKE) }, enabled = !filteringRunning) {
             Text("Run protected spike")
         }
 
@@ -120,10 +129,29 @@ fun SpikeScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(12.dp))
-        // The primary probe while the engine is under development — filled so it
-        // can't be confused with the two spikes above it.
-        Button(onClick = { launchRelayTest() }, enabled = !filteringRunning) {
+        OutlinedButton(onClick = { launch(Pending.RELAY) }, enabled = !filteringRunning) {
             Text("Run TCP relay test")
+        }
+
+        Spacer(Modifier.height(16.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(16.dp))
+
+        Text("No-root firewall engine", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Brings the tunnel up through the userspace datapath and enforces the per-app rules " +
+                "on it: apps set to \"Block\" get no network even while connected, without root. " +
+                "Experimental — it replaces the normal Connect flow, and only TCP and DNS are " +
+                "carried (other UDP, e.g. QUIC, is dropped, so apps fall back to TCP). " +
+                "Per-app blocking needs Android 10+.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { launch(Pending.FIREWALL) }) { Text("Start engine") }
+            OutlinedButton(onClick = viewModel::stopFirewallEngine) { Text("Stop") }
         }
 
         filteringExitIp?.let {
@@ -134,6 +162,9 @@ fun SpikeScreen(
         Spacer(Modifier.height(24.dp))
     }
 }
+
+/** Which probe the pending VPN-consent result should launch. */
+private enum class Pending { SPIKE, RELAY, FIREWALL }
 
 @Composable
 private fun LogBlock(lines: List<String>) {

@@ -23,6 +23,14 @@ class FilteringController @Inject constructor(
         )
     }
 
+    /** Brings up the tunnel through the userspace datapath with per-app rules applied. */
+    fun startFirewall() {
+        context.startService(
+            Intent(context, FilteringVpnService::class.java)
+                .setAction(FilteringVpnService.ACTION_START_FIREWALL),
+        )
+    }
+
     fun stop() {
         context.startService(
             Intent(context, FilteringVpnService::class.java).setAction(FilteringVpnService.ACTION_STOP),

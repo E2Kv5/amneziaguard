@@ -4,6 +4,13 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import android.content.pm.ServiceInfo
+import android.os.Build
+import com.amneziaguard.core.data.model.AppMode
+import com.amneziaguard.core.data.repo.RuleRepository
+import com.amneziaguard.core.data.settings.SettingsRepository
+import com.amneziaguard.core.firewall.FirewallPolicyCompiler
+import com.amneziaguard.core.firewall.UidPolicyResolver
 import com.amneziaguard.core.netstack.RelayPolicy
 import com.amneziaguard.core.netstack.Tun2Socks
 import com.amneziaguard.core.netstack.socks.Socks5Client
@@ -16,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.amnezia.awg.backend.SocketProtector
 import java.io.FileInputStream
@@ -24,12 +32,13 @@ import javax.inject.Inject
 import kotlin.concurrent.thread
 
 /**
- * Milestone 1 of the userspace datapath: our own VpnService that captures this
- * app only, starts amneziawg-go with bypass=1 and a real [protect]-backed
- * socket protector, and confirms the SOCKS5 exit IP works *under an active VPN*.
+ * The userspace datapath: our own VpnService carrying app traffic through
+ * amneziawg-go's SOCKS5 with per-app policy applied in between — which is what
+ * finally makes the BLOCK mode work without root while the tunnel is up.
  *
- * This isolates the one thing the plain spike could not test (the plain spike
- * used bypass=0). Once green, the full TCP/UDP relay slots into the same tun.
+ * It also hosts the two diagnostic probes that got it here (a protected spike
+ * and a one-shot relay test), kept because they isolate the proxy plumbing from
+ * the relay when something regresses.
  */
 @AndroidEntryPoint
 class FilteringVpnService : VpnService() {
@@ -37,6 +46,10 @@ class FilteringVpnService : VpnService() {
     @Inject lateinit var proxyController: AmneziaProxyController
     @Inject lateinit var configAssembler: ServerConfigAssembler
     @Inject lateinit var diagnostics: FilteringDiagnostics
+    @Inject lateinit var ruleRepository: RuleRepository
+    @Inject lateinit var settingsRepository: SettingsRepository
+    @Inject lateinit var policyCompiler: FirewallPolicyCompiler
+    @Inject lateinit var policyResolver: UidPolicyResolver
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var tun: ParcelFileDescriptor? = null
@@ -50,6 +63,7 @@ class FilteringVpnService : VpnService() {
                 teardown()
                 stopSelf()
             }
+            ACTION_START_FIREWALL -> scope.launch { guarded("firewall engine") { runFirewall() } }
             ACTION_RELAY_TEST -> scope.launch { guarded("TCP relay test") { runRelayTest() } }
             else -> scope.launch { guarded("protected spike") { runProtectedProbe() } }
         }
@@ -114,6 +128,94 @@ class FilteringVpnService : VpnService() {
         diagnostics.finish(ip)
         teardown()
         stopSelf()
+    }
+
+    /**
+     * The real thing: bring the tunnel up through our own datapath and enforce
+     * the per-app rules on it.
+     *
+     * BYPASS apps are kept out of the tun entirely (that is what the compiled
+     * include/exclude sets express, and it is both cheaper and more honest than
+     * capturing and re-emitting their traffic). Everything else is captured, and
+     * each flow's owning app decides between relay and drop.
+     */
+    private suspend fun runFirewall() {
+        val log: (String) -> Unit = { diagnostics.append(it) }
+        diagnostics.reset("no-root firewall engine")
+
+        val conf = configAssembler.activeServerConf()
+        if (conf == null) {
+            log("No active server / config — pick one on the Servers screen first.")
+            diagnostics.finish(null); teardown(); stopSelf(); return
+        }
+
+        val settings = settingsRepository.settings.first()
+        val rules = ruleRepository.rules()
+        policyResolver.update(rules, settings.defaultAppMode)
+        val appPolicy = policyCompiler.compile(rules, settings.defaultAppMode)
+        val blocked = rules.count { it.value == AppMode.BLOCK }
+        log("Rules: default=${settings.defaultAppMode}, $blocked blocked, " +
+            "${appPolicy.included.size} included, ${appPolicy.excluded.size} bypassed")
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            log("Note: per-app blocking needs Android 10+ (connection owner lookup); " +
+                "flows will follow the default mode on this device.")
+        }
+
+        val fd = establishTun(appPolicy.included, appPolicy.excluded)
+        if (fd == null) {
+            log("establish() returned null (VPN not authorized?).")
+            diagnostics.finish(null); teardown(); stopSelf(); return
+        }
+        tun = fd
+        startForegroundNotice()
+        log("Tun up; starting amneziawg-go bypass=1 + protect()…")
+
+        proxyController.setProtector(SocketProtector { socketFd -> if (protect(socketFd)) 1 else 0 })
+        val port = proxyController.start(conf, tunnelName = "awgfw", bypass = 1).getOrElse {
+            log("Proxy failed to start: ${it.message}")
+            diagnostics.finish(null); teardown(); stopSelf(); return
+        }
+        TraceProbe.awaitPort(port)
+        log("SOCKS5 up on 127.0.0.1:$port; engine running — traffic is now filtered.")
+
+        Tun2Socks(
+            tunIn = FileInputStream(fd.fileDescriptor),
+            tunOut = FileOutputStream(fd.fileDescriptor),
+            socksPort = port,
+            credentials = Socks5Client.Credentials(
+                AmneziaProxyController.SOCKS_USER,
+                AmneziaProxyController.SOCKS_PASS,
+            ),
+            mtu = MTU,
+            policy = { flow ->
+                if (policyResolver.modeFor(flow) == AppMode.BLOCK) RelayPolicy.DROP else RelayPolicy.RELAY
+            },
+            log = { /* per-flow noise stays in logcat only */ },
+        ).also { engine = it }.start()
+
+        // Rule edits take effect without restarting the tunnel; only a change to
+        // the include/exclude split would need a new tun, which is a restart.
+        scope.launch {
+            ruleRepository.observeRules().collect { updated ->
+                policyResolver.update(updated, settingsRepository.settings.first().defaultAppMode)
+            }
+        }
+    }
+
+    private fun startForegroundNotice() {
+        val notification = TunnelNotifications.build(
+            this, "AmneziaGuard", "Firewall engine active (experimental)", showDisconnect = false,
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                TunnelNotifications.NOTIFICATION_ID + 1,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } else {
+            startForeground(TunnelNotifications.NOTIFICATION_ID + 1, notification)
+        }
     }
 
     /**
@@ -193,7 +295,10 @@ class FilteringVpnService : VpnService() {
      * No ::/0 route — the engine has no IPv6 path yet, and capturing v6 without
      * an address only creates a blackhole that muddies the test.
      */
-    private fun establishTun(): ParcelFileDescriptor? {
+    private fun establishTun(
+        included: Set<String> = setOf(packageName),
+        excluded: Set<String> = emptySet(),
+    ): ParcelFileDescriptor? {
         val builder = Builder()
             .setSession("AmneziaGuard filter")
             .addAddress("10.111.0.2", 32)
@@ -205,7 +310,10 @@ class FilteringVpnService : VpnService() {
             .setMtu(MTU)
             // Ask for blocking reads; otherwise read() returns 0 when idle.
             .setBlocking(true)
-        runCatching { builder.addAllowedApplication(packageName) }
+        // Builder rejects mixing the two lists; FirewallPolicyCompiler already
+        // guarantees at most one of them is non-empty.
+        included.forEach { runCatching { builder.addAllowedApplication(it) } }
+        excluded.forEach { runCatching { builder.addDisallowedApplication(it) } }
         return runCatching { builder.establish() }
             .onFailure { diagnostics.append("establish() threw: ${it.message}") }
             .getOrNull()
@@ -228,6 +336,7 @@ class FilteringVpnService : VpnService() {
     private fun teardown() {
         runCatching { engine?.stop() }
         engine = null
+        runCatching { scope.launch { proxyController.stop() } }
         drain?.interrupt()
         drain = null
         runCatching { tun?.close() }
@@ -244,6 +353,7 @@ class FilteringVpnService : VpnService() {
         const val ACTION_START = "com.amneziaguard.filter.START"
         const val ACTION_STOP = "com.amneziaguard.filter.STOP"
         const val ACTION_RELAY_TEST = "com.amneziaguard.filter.RELAY_TEST"
+        const val ACTION_START_FIREWALL = "com.amneziaguard.filter.START_FIREWALL"
         private const val MTU = 1280
         private const val ROUTE_SETTLE_MS = 1_500L
     }
