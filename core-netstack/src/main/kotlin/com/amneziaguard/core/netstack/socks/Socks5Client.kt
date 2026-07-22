@@ -13,6 +13,7 @@ object Socks5Client {
 
     private const val VERSION = 0x05
     private const val CMD_CONNECT = 0x01
+    private const val CMD_ASSOCIATE = 0x03
     private const val ATYP_IPV4 = 0x01
     private const val ATYP_DOMAIN = 0x03
     private const val ATYP_IPV6 = 0x04
@@ -38,6 +39,42 @@ object Socks5Client {
     ) {
         greet(input, output, credentials)
         sendConnect(input, output, destIp, destPort)
+    }
+
+    /**
+     * Opens a UDP association (RFC 1928 §4/§7) on an already-connected control
+     * stream and returns the relay endpoint to send datagrams to. The request
+     * declares 0.0.0.0:0 so the server accepts datagrams from any local port —
+     * it validates the source against this address.
+     *
+     * The association lives as long as the control stream: closing it tears the
+     * relay down.
+     */
+    fun associate(
+        input: InputStream,
+        output: OutputStream,
+        credentials: Credentials? = null,
+    ): Pair<ByteArray, Int> {
+        greet(input, output, credentials)
+        output.write(
+            byteArrayOf(VERSION.toByte(), CMD_ASSOCIATE.toByte(), 0x00, ATYP_IPV4.toByte(),
+                0, 0, 0, 0, 0, 0),
+        )
+        output.flush()
+
+        val head = readExactly(input, 4)
+        if (head[0].toInt() and 0xFF != VERSION) throw Socks5Exception("bad reply version")
+        val rep = head[1].toInt() and 0xFF
+        if (rep != 0x00) throw Socks5Exception("ASSOCIATE failed, reply=$rep")
+        val addr = when (head[3].toInt() and 0xFF) {
+            ATYP_IPV4 -> readExactly(input, 4)
+            ATYP_IPV6 -> readExactly(input, 16)
+            ATYP_DOMAIN -> readExactly(input, readExactly(input, 1)[0].toInt() and 0xFF)
+            else -> throw Socks5Exception("bad reply atyp")
+        }
+        val portBytes = readExactly(input, 2)
+        val port = ((portBytes[0].toInt() and 0xFF) shl 8) or (portBytes[1].toInt() and 0xFF)
+        return addr to port
     }
 
     private fun greet(input: InputStream, output: OutputStream, credentials: Credentials?) {

@@ -142,9 +142,8 @@ fun SpikeScreen(
         Text(
             "Brings the tunnel up through the userspace datapath and enforces the per-app rules " +
                 "on it: apps set to \"Block\" get no network even while connected, without root. " +
-                "Experimental — it replaces the normal Connect flow, and only TCP and DNS are " +
-                "carried (other UDP, e.g. QUIC, is dropped, so apps fall back to TCP). " +
-                "Per-app blocking needs Android 10+.",
+                "TCP and UDP (QUIC, DNS) are both carried through the tunnel. Experimental — it " +
+                "replaces the normal Connect flow. Per-app blocking needs Android 10+.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

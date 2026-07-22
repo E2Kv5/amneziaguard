@@ -9,6 +9,7 @@ import com.amneziaguard.core.netstack.packet.PacketBuilder
 import com.amneziaguard.core.netstack.packet.TcpFlags
 import com.amneziaguard.core.netstack.socks.Socks5Client
 import com.amneziaguard.core.netstack.tcp.TcpConnection
+import com.amneziaguard.core.netstack.udp.Socks5UdpRelay
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
@@ -37,6 +38,7 @@ class Tun2Socks(
 ) {
     private val connections = ConcurrentHashMap<FlowKey, TcpConnection>()
     private val dnsRelay = DnsOverTcpRelay(socksPort, credentials, ::writeToTun)
+    private val udpRelay = Socks5UdpRelay(socksPort, credentials, mtu, ::writeToTun)
     private val writeLock = Any()
     @Volatile private var running = false
     private var reader: Thread? = null
@@ -57,6 +59,7 @@ class Tun2Socks(
         connections.values.forEach { runCatching { it.close() } }
         connections.clear()
         dnsRelay.stop()
+        udpRelay.stop()
         reader?.interrupt()
         Log.i(TAG, "engine stopped (read=${packetsRead.get()} wrote=${packetsWritten.get()} otherDropped=${droppedOther.get()})")
         log("Engine stopped: read ${packetsRead.get()} pkt, wrote ${packetsWritten.get()} pkt, non-TCP dropped ${droppedOther.get()}")
@@ -193,24 +196,28 @@ class Tun2Socks(
     }
 
     /**
-     * UDP is carried only for DNS today, re-sent over TCP by [DnsOverTcpRelay]
-     * because the SOCKS5 has no UDP ASSOCIATE. Everything else (QUIC, games) is
-     * dropped, which pushes those apps onto their TCP fallback.
+     * UDP goes through a SOCKS5 UDP association, which amneziawg-go dials with
+     * the WireGuard netstack — so QUIC, games and plain DNS all traverse the
+     * tunnel. If an association can't be set up, DNS still gets through via the
+     * DNS-over-TCP fallback rather than leaving the app with no resolver.
      */
     private fun handleUdp(packet: IpPacket) {
         val key = packet.flowKey()
-        if (key.destPort != DNS_PORT) {
-            droppedOther.incrementAndGet()
-            return
-        }
         if (policy(key) == RelayPolicy.DROP) {
-            Log.d(TAG, "DNS from ${ip(key.sourceIp)}:${key.sourcePort} dropped by policy")
+            droppedOther.incrementAndGet()
             return
         }
         val payloadOffset = packet.transportOffset + UDP_HEADER
         val payloadLen = packet.totalLength - payloadOffset
         if (payloadLen <= 0) return
-        dnsRelay.resolve(key, packet.data.copyOfRange(payloadOffset, payloadOffset + payloadLen))
+        val payload = packet.data.copyOfRange(payloadOffset, payloadOffset + payloadLen)
+
+        if (udpRelay.send(key, payload)) return
+        if (key.destPort == DNS_PORT) {
+            dnsRelay.resolve(key, payload)
+        } else {
+            droppedOther.incrementAndGet()
+        }
     }
 
     /** RST+ACK refusing a SYN (server→app), acknowledging the SYN's sequence. */

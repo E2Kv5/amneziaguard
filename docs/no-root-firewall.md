@@ -89,7 +89,9 @@ apply per-UID filtering. `awgSetSocketProtector` must be given a protector that 
 - [x] Spike: amneziawg-go SOCKS5 comes up and reaches the internet (exit IP = server).
 - [x] Same under our own VpnService with `bypass=1` + `protect()` — no routing loop.
 - [x] tun2socks TCP relay carries a real TLS session end-to-end (exit IP = server).
-- [ ] DNS: plain UDP:53 queries answered via the DNS-over-TCP relay.
+- [x] DNS: plain UDP:53 queries answered through the tunnel.
+- [x] BLOCK app has no network while the tunnel is up, without root (manually verified).
+- [ ] UDP: QUIC/games carried via SOCKS5 UDP ASSOCIATE.
 - [ ] Allowed app: normal browsing through the tunnel (exit IP = server).
 - [ ] BLOCK app while tunnel UP: no network at all (verify with a test app).
 - [ ] BYPASS app: uses the real network (exit IP = local ISP).
@@ -111,6 +113,7 @@ apply per-UID filtering. `awgSetSocketProtector` must be given a protector that 
 ## Risks
 
 - JVM tun2socks correctness/perf (TCP reassembly, MTU, checksums, ICMP). Highest remaining risk.
-- The SOCKS5 offers CONNECT only, so UDP can't be forwarded natively: DNS is re-sent over TCP and
-  other UDP (QUIC, games) is dropped, pushing those apps onto their TCP fallback.
+- UDP rides SOCKS5 UDP ASSOCIATE, which `things-go/go-socks5` dials with wireproxy's netstack
+  dialer — so datagrams do traverse the tunnel. Oversized replies (> MTU) are dropped rather than
+  fragmented, and DNS falls back to DNS-over-TCP if an association can't be opened.
 - Battery: userspace datapath is heavier than the kernel/GoBackend path.
