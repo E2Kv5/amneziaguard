@@ -12,6 +12,7 @@ import com.amneziaguard.core.netstack.tcp.TcpConnection
 import com.amneziaguard.core.netstack.udp.Socks5UdpRelay
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -36,13 +37,20 @@ class Tun2Socks(
     private val mtu: Int,
     private val policy: (FlowKey) -> RelayPolicy,
     private val log: (String) -> Unit = {},
+    /** One line every [STATS_INTERVAL_MS]; separate from [log] so per-flow noise can stay off. */
+    private val stats: (String) -> Unit = {},
 ) {
     private val connections = ConcurrentHashMap<FlowKey, TcpConnection>()
     private val dnsRelay = DnsOverTcpRelay(socksPort, credentials, ::writeToTun)
     private val udpRelay = Socks5UdpRelay(socksPort, credentials, mtu, ::writeToTun)
-    private val writeLock = Any()
     @Volatile private var running = false
     private var reader: Thread? = null
+    private var statsReporter: Thread? = null
+
+    // Summed across every writing thread, so dividing by wall time gives the
+    // average number of threads inside a tun write at once — the datapath's
+    // write concurrency. Below 1 means the writes are not the ceiling.
+    private val writeNanos = AtomicLong()
 
     private val packetsRead = AtomicInteger()
     private val packetsWritten = AtomicInteger()
@@ -59,6 +67,7 @@ class Tun2Socks(
     fun start() {
         running = true
         reader = thread(name = "tun2socks", isDaemon = true) { readLoop() }
+        statsReporter = thread(name = "tun2socks-stats", isDaemon = true) { statsLoop() }
         Log.i(TAG, "engine started (socksPort=$socksPort, mtu=$mtu)")
         log("Engine started (SOCKS5 127.0.0.1:$socksPort)")
     }
@@ -70,23 +79,90 @@ class Tun2Socks(
         dnsRelay.stop()
         udpRelay.stop()
         reader?.interrupt()
+        statsReporter?.interrupt()
         Log.i(TAG, "engine stopped (read=${packetsRead.get()} wrote=${packetsWritten.get()} otherDropped=${droppedOther.get()})")
         log("Engine stopped: read ${packetsRead.get()} pkt, wrote ${packetsWritten.get()} pkt, non-TCP dropped ${droppedOther.get()}")
     }
 
+    /**
+     * Writes one packet to the tun, from whichever thread produced it.
+     *
+     * There is deliberately no lock. A write to a tun fd is atomic per packet —
+     * the driver takes the whole packet or fails — and FileOutputStream issues
+     * exactly one write syscall for it, so there is no interleaving to prevent.
+     * Serialising here bought nothing and cost a great deal: with a connection
+     * per Ookla stream the engine measured twenty threads queued on this monitor
+     * at once, and the handoffs (each a futex wake and a context switch, often
+     * preempting the lock holder mid-write) dominated the download path.
+     */
     private fun writeToTun(packet: ByteArray) {
-        synchronized(writeLock) {
+        val started = System.nanoTime()
+        try {
+            tunOut.write(packet)
+            packetsWritten.incrementAndGet()
+            downloaded.addAndGet(packet.size.toLong())
+        } catch (e: Exception) {
+            Log.e(TAG, "tun write failed (${packet.size}B)", e)
+            log("tun write failed: ${e.message}")
+        }
+        writeNanos.addAndGet(System.nanoTime() - started)
+    }
+
+    /**
+     * Reports what the datapath actually did over the last interval.
+     *
+     * `tun write` is time summed over all writing threads divided by wall time,
+     * so it reads as concurrency rather than utilisation: 300% means three
+     * threads were writing on average. `us/wr` is the mean cost of one write,
+     * which is the number to watch — if it stays near a syscall's cost the
+     * writes are healthy, and if it inflates the threads are fighting for CPU.
+     */
+    private fun statsLoop() {
+        var atNanos = System.nanoTime()
+        var down = downloaded.get()
+        var up = uploaded.get()
+        var wrote = packetsWritten.get().toLong()
+        var read = packetsRead.get().toLong()
+        var busy = writeNanos.get()
+
+        while (running) {
             try {
-                tunOut.write(packet)
-                tunOut.flush()
-                packetsWritten.incrementAndGet()
-                downloaded.addAndGet(packet.size.toLong())
-            } catch (e: Exception) {
-                Log.e(TAG, "tun write failed (${packet.size}B)", e)
-                log("tun write failed: ${e.message}")
+                Thread.sleep(STATS_INTERVAL_MS)
+            } catch (_: InterruptedException) {
+                return
             }
+            val now = System.nanoTime()
+            val elapsed = now - atNanos
+            if (elapsed <= 0) continue
+            val nowDown = downloaded.get()
+            val nowUp = uploaded.get()
+            val nowWrote = packetsWritten.get().toLong()
+            val nowRead = packetsRead.get().toLong()
+            val nowBusy = writeNanos.get()
+
+            val secs = elapsed / 1e9
+            val writes = nowWrote - wrote
+            val perWrite = if (writes > 0) (nowBusy - busy) / writes / 1_000 else 0
+            val line = "↓${mbit(nowDown - down, secs)} ↑${mbit(nowUp - up, secs)} Mbit/s | " +
+                "pkt ↓${perSec(writes, secs)} ↑${perSec(nowRead - read, secs)} /s | " +
+                "tun write ${share(nowBusy - busy, elapsed)}, ${perWrite}us/wr | " +
+                "conns ${connections.size}"
+            Log.i(TAG, line)
+            stats(line)
+
+            atNanos = now
+            down = nowDown; up = nowUp
+            wrote = nowWrote; read = nowRead
+            busy = nowBusy
         }
     }
+
+    private fun mbit(bytes: Long, secs: Double): String =
+        String.format(Locale.US, "%.1f", bytes * 8 / secs / 1e6)
+
+    private fun perSec(count: Long, secs: Double): String = (count / secs).toInt().toString()
+
+    private fun share(part: Long, whole: Long): String = "${part * 100 / whole}%"
 
     private fun readLoop() {
         val buf = ByteArray(mtu + 200)
@@ -262,6 +338,7 @@ class Tun2Socks(
         const val TAG = "AGEngine"
         private const val LOG_FIRST = 40
         private const val IDLE_BACKOFF_MS = 1L
+        private const val STATS_INTERVAL_MS = 2_000L
         private const val DNS_PORT = 53
         private const val UDP_HEADER = 8
         private val EMPTY = ByteArray(0)
