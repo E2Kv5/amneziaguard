@@ -15,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.amnezia.awg.backend.SocketProtector
 import java.io.FileInputStream
@@ -157,9 +158,22 @@ class FilteringVpnService : VpnService() {
         ).also { engine = it }
         relay.start()
 
+        // The VPN's per-UID routing rules land a moment after establish(); a
+        // socket opened too early sends its SYN over the underlying network and
+        // only its later packets get captured — a half-open flow the engine can
+        // never serve. Let routing settle, and retry once if we still race it.
+        log("Letting VPN routing settle…")
+        delay(ROUTE_SETTLE_MS)
+
         log("Probing exit IP through the relay…")
-        val ip = runCatching { TraceProbe.fetchExitIpDirect(log) }
+        var ip = runCatching { TraceProbe.fetchExitIpDirect(log) }
             .getOrElse { log("Probe error: ${it.message}"); null }
+        if (ip == null) {
+            log("Retrying the probe with a fresh socket…")
+            delay(ROUTE_SETTLE_MS)
+            ip = runCatching { TraceProbe.fetchExitIpDirect(log) }
+                .getOrElse { log("Retry error: ${it.message}"); null }
+        }
 
         runCatching { relay.stop() }
         runCatching { proxyController.stop() }
@@ -231,5 +245,6 @@ class FilteringVpnService : VpnService() {
         const val ACTION_STOP = "com.amneziaguard.filter.STOP"
         const val ACTION_RELAY_TEST = "com.amneziaguard.filter.RELAY_TEST"
         private const val MTU = 1280
+        private const val ROUTE_SETTLE_MS = 1_500L
     }
 }

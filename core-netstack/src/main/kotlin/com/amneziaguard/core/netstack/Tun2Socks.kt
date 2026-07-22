@@ -152,9 +152,14 @@ class Tun2Socks(
 
         val conn = existing
         if (conn == null) {
-            // Traffic for a flow we don't know (e.g. after teardown): refuse it
-            // so the app fails fast instead of hanging.
-            if (!flags.rst) writeToTun(rstFor(key, flags.sequenceNumber))
+            // A flow we never saw open — e.g. a socket whose SYN escaped before
+            // the VPN's routes took effect, or leftovers after teardown. Refuse
+            // it so the app fails fast instead of retransmitting until timeout.
+            if (!flags.rst) {
+                Log.d(TAG, "unknown flow ${ip(key.sourceIp)}:${key.sourcePort} → " +
+                    "${ip(key.destIp)}:${key.destPort} → RST")
+                writeToTun(rstForSegment(key, flags))
+            }
             return
         }
 
@@ -191,6 +196,24 @@ class Tun2Socks(
             seq = 0, ack = (seq + 1) and 0xFFFFFFFFL,
             flags = PacketBuilder.TcpFlag.RST or PacketBuilder.TcpFlag.ACK,
         )
+
+    /**
+     * RST for a segment of an unknown, already-open flow. RFC 793: when the
+     * offending segment carries an ACK the reset takes its sequence number from
+     * that ACK — a fixed seq=0 lands outside the peer's window and modern
+     * stacks (RFC 5961) simply ignore it, so the flow would hang instead.
+     */
+    private fun rstForSegment(key: FlowKey, flags: TcpFlags): ByteArray =
+        if (flags.ack) {
+            PacketBuilder.ipv4Tcp(
+                sourceIp = key.destIp, destIp = key.sourceIp,
+                sourcePort = key.destPort, destPort = key.sourcePort,
+                seq = flags.acknowledgementNumber, ack = 0,
+                flags = PacketBuilder.TcpFlag.RST,
+            )
+        } else {
+            rstFor(key, flags.sequenceNumber)
+        }
 
     companion object {
         const val TAG = "AGEngine"
