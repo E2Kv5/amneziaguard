@@ -1,6 +1,7 @@
 package com.amneziaguard.core.netstack
 
 import android.util.Log
+import com.amneziaguard.core.netstack.dns.DnsOverTcpRelay
 import com.amneziaguard.core.netstack.packet.FlowKey
 import com.amneziaguard.core.netstack.packet.IpPacket
 import com.amneziaguard.core.netstack.packet.IpProtocol
@@ -35,6 +36,7 @@ class Tun2Socks(
     private val log: (String) -> Unit = {},
 ) {
     private val connections = ConcurrentHashMap<FlowKey, TcpConnection>()
+    private val dnsRelay = DnsOverTcpRelay(socksPort, credentials, ::writeToTun)
     private val writeLock = Any()
     @Volatile private var running = false
     private var reader: Thread? = null
@@ -54,6 +56,7 @@ class Tun2Socks(
         running = false
         connections.values.forEach { runCatching { it.close() } }
         connections.clear()
+        dnsRelay.stop()
         reader?.interrupt()
         Log.i(TAG, "engine stopped (read=${packetsRead.get()} wrote=${packetsWritten.get()} otherDropped=${droppedOther.get()})")
         log("Engine stopped: read ${packetsRead.get()} pkt, wrote ${packetsWritten.get()} pkt, non-TCP dropped ${droppedOther.get()}")
@@ -115,7 +118,8 @@ class Tun2Socks(
             if (packet.version != 4) { droppedOther.incrementAndGet(); continue }
             when (packet.protocol) {
                 IpProtocol.TCP -> handleTcp(packet)
-                else -> droppedOther.incrementAndGet() // UDP/DNS in a later milestone
+                IpProtocol.UDP -> handleUdp(packet)
+                else -> droppedOther.incrementAndGet()
             }
         }
         Log.i(TAG, "read loop exited (read=${packetsRead.get()}, idleReads=$idleReads, running=$running)")
@@ -188,6 +192,27 @@ class Tun2Socks(
         }
     }
 
+    /**
+     * UDP is carried only for DNS today, re-sent over TCP by [DnsOverTcpRelay]
+     * because the SOCKS5 has no UDP ASSOCIATE. Everything else (QUIC, games) is
+     * dropped, which pushes those apps onto their TCP fallback.
+     */
+    private fun handleUdp(packet: IpPacket) {
+        val key = packet.flowKey()
+        if (key.destPort != DNS_PORT) {
+            droppedOther.incrementAndGet()
+            return
+        }
+        if (policy(key) == RelayPolicy.DROP) {
+            Log.d(TAG, "DNS from ${ip(key.sourceIp)}:${key.sourcePort} dropped by policy")
+            return
+        }
+        val payloadOffset = packet.transportOffset + UDP_HEADER
+        val payloadLen = packet.totalLength - payloadOffset
+        if (payloadLen <= 0) return
+        dnsRelay.resolve(key, packet.data.copyOfRange(payloadOffset, payloadOffset + payloadLen))
+    }
+
     /** RST+ACK refusing a SYN (server→app), acknowledging the SYN's sequence. */
     private fun rstFor(key: FlowKey, seq: Long): ByteArray =
         PacketBuilder.ipv4Tcp(
@@ -219,6 +244,8 @@ class Tun2Socks(
         const val TAG = "AGEngine"
         private const val LOG_FIRST = 40
         private const val IDLE_BACKOFF_MS = 1L
+        private const val DNS_PORT = 53
+        private const val UDP_HEADER = 8
         private val EMPTY = ByteArray(0)
 
         fun ip(addr: ByteArray): String =

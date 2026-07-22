@@ -86,17 +86,31 @@ apply per-UID filtering. `awgSetSocketProtector` must be given a protector that 
 
 ## Device-validation checklist (needs a real AWG server config + device/emulator)
 
-- [ ] Spike: amneziawg-go SOCKS5 comes up; `curl` through `127.0.0.1:<port>` reaches the internet.
-- [ ] Handshake succeeds with obfuscation params (Jc/S/H/I) present in the config.
+- [x] Spike: amneziawg-go SOCKS5 comes up and reaches the internet (exit IP = server).
+- [x] Same under our own VpnService with `bypass=1` + `protect()` — no routing loop.
+- [x] tun2socks TCP relay carries a real TLS session end-to-end (exit IP = server).
+- [ ] DNS: plain UDP:53 queries answered via the DNS-over-TCP relay.
 - [ ] Allowed app: normal browsing through the tunnel (exit IP = server).
 - [ ] BLOCK app while tunnel UP: no network at all (verify with a test app).
 - [ ] BYPASS app: uses the real network (exit IP = local ISP).
 - [ ] Wi-Fi ↔ mobile roaming keeps flows alive.
 - [ ] Battery/throughput sanity vs. the stock GoBackend path.
 
+## Lessons the device taught us (don't re-learn these)
+
+- `read()` returning **0** on the tun fd means "no packet right now", **not** EOF. Treating it as
+  end-of-stream silently kills the datapath after the first idle moment.
+- A socket opened immediately after `establish()` can still leave over the underlying network: the
+  per-UID routing rules land slightly later, producing a half-open flow (source = Wi-Fi address)
+  the engine can never serve. Give routing a moment, or bind explicitly to the VPN network.
+- A RST with `seq = 0` is outside the peer's window, so RFC 5961 stacks ignore it. Per RFC 793,
+  when the offending segment carries an ACK the RST must take its sequence from that ACK.
+- `bypass=1` installs amneziawg-go's socket-protection hook and treats a **0** return from
+  `SocketProtector.bypass()` as EACCES; with no VpnService use `bypass=0` instead.
+
 ## Risks
 
-- JVM tun2socks correctness/perf (TCP reassembly, MTU, checksums, UDP, ICMP). Highest risk.
-- `awgStartProxy` behaviour outside `ProxyGoBackend` (uapiPath, bypass flag, protector wiring) —
-  confirm on device in the spike.
+- JVM tun2socks correctness/perf (TCP reassembly, MTU, checksums, ICMP). Highest remaining risk.
+- The SOCKS5 offers CONNECT only, so UDP can't be forwarded natively: DNS is re-sent over TCP and
+  other UDP (QUIC, games) is dropped, pushing those apps onto their TCP fallback.
 - Battery: userspace datapath is heavier than the kernel/GoBackend path.
