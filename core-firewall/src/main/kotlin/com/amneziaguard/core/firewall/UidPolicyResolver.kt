@@ -35,14 +35,26 @@ class UidPolicyResolver @Inject constructor(
     // on the read loop, so caching keeps per-connection work to one binder call.
     private val modeByUid = ConcurrentHashMap<Int, AppMode>()
 
+    // TCP asks once per connection, but UDP asks once per *datagram* — and
+    // getConnectionOwnerUid is a binder round trip into system_server, orders of
+    // magnitude more expensive than everything else the datapath does per packet.
+    // A flow's owner cannot change while the flow is alive, so the answer is
+    // memoised; the TTL exists only because we can't see the flow close, and it
+    // bounds how long a reused 5-tuple could inherit the previous owner.
+    private val uidByFlow = ConcurrentHashMap<FlowKey, CachedUid>()
+
+    private class CachedUid(val uid: Int, val resolvedAtMs: Long)
+
     fun update(rules: Map<String, AppMode>, defaultMode: AppMode) {
         this.rules = rules
         this.defaultMode = defaultMode
         modeByUid.clear()
+        // uidByFlow survives: which app owns a flow does not depend on the rules,
+        // and re-resolving every live flow would cost a binder storm per edit.
     }
 
     fun modeFor(flow: FlowKey): AppMode {
-        val uid = uidResolver.uidFor(flow)
+        val uid = uidFor(flow)
         if (uid == INVALID_UID) return defaultMode
         modeByUid[uid]?.let { return it }
 
@@ -57,6 +69,30 @@ class UidPolicyResolver @Inject constructor(
         return mode
     }
 
+    /**
+     * The owning UID, from cache when it was resolved recently. Only successful
+     * lookups are cached: an unknown owner falls back to the default mode, and
+     * remembering that would keep applying the default to a flow whose socket
+     * simply hadn't landed in the kernel's table yet.
+     */
+    private fun uidFor(flow: FlowKey): Int {
+        val now = System.currentTimeMillis()
+        uidByFlow[flow]?.let { if (now - it.resolvedAtMs < UID_TTL_MS) return it.uid }
+
+        val uid = uidResolver.uidFor(flow)
+        if (uid != INVALID_UID) {
+            if (uidByFlow.size >= MAX_CACHED_FLOWS) prune(now)
+            uidByFlow[flow] = CachedUid(uid, now)
+        }
+        return uid
+    }
+
+    /** Drops expired flows; if they were all fresh, starts over rather than grow. */
+    private fun prune(now: Long) {
+        uidByFlow.entries.removeAll { now - it.value.resolvedAtMs >= UID_TTL_MS }
+        if (uidByFlow.size >= MAX_CACHED_FLOWS) uidByFlow.clear()
+    }
+
     private val AppMode.strictness: Int
         get() = when (this) {
             AppMode.BLOCK -> 0
@@ -66,5 +102,11 @@ class UidPolicyResolver @Inject constructor(
 
     private companion object {
         const val TAG = "AGEngine"
+
+        // One second still collapses a QUIC flow's thousands of datagrams per
+        // second into a single lookup, while keeping the window in which a
+        // recycled source port could be attributed to its previous owner short.
+        const val UID_TTL_MS = 1_000L
+        const val MAX_CACHED_FLOWS = 4_096
     }
 }
