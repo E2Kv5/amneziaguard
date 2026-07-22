@@ -28,8 +28,22 @@ object PacketBuilder {
         flags: Int,
         window: Int = 65535,
         payload: ByteArray = EMPTY,
+        // The relay hands us a slice of its read buffer; copying it out first
+        // would allocate a second full-MSS array per downstream packet.
+        payloadOffset: Int = 0,
+        payloadLength: Int = payload.size - payloadOffset,
+        /**
+         * Maximum segment size to advertise. Only meaningful on a SYN, and
+         * omitting it is not neutral: RFC 1122 §4.2.2.6 makes a peer that never
+         * saw an MSS option fall back to 536 bytes, so the app would send us
+         * less than half an MTU per packet and we would pay for the difference
+         * in packet rate on every byte it uploads.
+         */
+        mss: Int? = null,
     ): ByteArray {
-        val tcpLen = 20 + payload.size
+        val optionBytes = if (mss != null) 4 else 0
+        val headerLen = 20 + optionBytes
+        val tcpLen = headerLen + payloadLength
         val packet = ByteArray(20 + tcpLen)
         writeIpv4Header(packet, sourceIp, destIp, IpProtocol.TCP, tcpLen)
 
@@ -38,12 +52,17 @@ object PacketBuilder {
         putShort(packet, t + 2, destPort)
         putInt(packet, t + 4, seq)
         putInt(packet, t + 8, ack)
-        packet[t + 12] = (5 shl 4).toByte() // data offset 5 words, no options
+        packet[t + 12] = ((headerLen / 4) shl 4).toByte()
         packet[t + 13] = flags.toByte()
         putShort(packet, t + 14, window)
         // checksum (t+16..17) left zero for computation
         putShort(packet, t + 18, 0) // urgent pointer
-        payload.copyInto(packet, t + 20)
+        if (mss != null) {
+            packet[t + 20] = MSS_KIND
+            packet[t + 21] = MSS_LENGTH
+            putShort(packet, t + 22, mss)
+        }
+        payload.copyInto(packet, t + headerLen, payloadOffset, payloadOffset + payloadLength)
 
         val cs = Checksums.transport(sourceIp, destIp, IpProtocol.TCP, packet, t, tcpLen)
         putShort(packet, t + 16, cs)
@@ -108,6 +127,9 @@ object PacketBuilder {
         b[o + 2] = (v shr 8).toByte()
         b[o + 3] = v.toByte()
     }
+
+    private const val MSS_KIND: Byte = 2
+    private const val MSS_LENGTH: Byte = 4
 
     private val EMPTY = ByteArray(0)
 }

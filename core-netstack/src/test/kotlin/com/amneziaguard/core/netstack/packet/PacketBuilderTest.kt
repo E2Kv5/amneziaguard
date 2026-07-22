@@ -80,6 +80,50 @@ class PacketBuilderTest {
     }
 
     @Test
+    fun `syn-ack advertises the mss option`() {
+        val packet = PacketBuilder.ipv4Tcp(
+            src, dst, 443, 51000, seq = 0, ack = 1,
+            flags = PacketBuilder.TcpFlag.SYN or PacketBuilder.TcpFlag.ACK,
+            mss = 1240,
+        )
+        val parsed = IpPacket.parse(packet)!!
+        val t = parsed.transportOffset
+        val f = TcpFlags(parsed.data, t)
+        // Data offset must grow to 6 words, or the peer never sees the option.
+        assertEquals(24, f.dataOffsetBytes)
+        assertEquals(2, packet[t + 20].toInt()) // kind = MSS
+        assertEquals(4, packet[t + 21].toInt()) // length
+        assertEquals(1240, ((packet[t + 22].toInt() and 0xFF) shl 8) or (packet[t + 23].toInt() and 0xFF))
+        assertEquals(0xFFFF, foldOnesComplement(packet, 0, 20))
+        assertEquals(0, Checksums.transport(src, dst, IpProtocol.TCP, packet, 20, packet.size - 20))
+    }
+
+    @Test
+    fun `mss option and payload coexist without overlapping`() {
+        val payload = byteArrayOf(1, 2, 3, 4)
+        val packet = PacketBuilder.ipv4Tcp(
+            src, dst, 443, 51000, seq = 0, ack = 1,
+            flags = PacketBuilder.TcpFlag.ACK, payload = payload, mss = 1240,
+        )
+        val parsed = IpPacket.parse(packet)!!
+        val t = parsed.transportOffset
+        assertEquals(24, TcpFlags(parsed.data, t).dataOffsetBytes)
+        // Payload must start after the option, not on top of it.
+        assertArrayEquals(payload, packet.copyOfRange(t + 24, t + 28))
+        assertEquals(48, parsed.totalLength) // 20 IP + 24 TCP + 4 payload
+    }
+
+    @Test
+    fun `segment without mss keeps the 20-byte header`() {
+        val packet = PacketBuilder.ipv4Tcp(
+            src, dst, 443, 51000, seq = 0, ack = 1, flags = PacketBuilder.TcpFlag.ACK,
+        )
+        val parsed = IpPacket.parse(packet)!!
+        assertEquals(20, TcpFlags(parsed.data, parsed.transportOffset).dataOffsetBytes)
+        assertEquals(40, parsed.totalLength)
+    }
+
+    @Test
     fun `rst segment has no payload and correct flag`() {
         val packet = PacketBuilder.ipv4Tcp(
             src, dst, 80, 12345, seq = 0, ack = 1,

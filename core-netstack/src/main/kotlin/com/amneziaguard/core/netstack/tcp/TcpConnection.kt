@@ -33,9 +33,15 @@ class TcpConnection(
     private val dstPort = key.destPort
     private val tag = "${Tun2Socks.ip(dstIp)}:$dstPort/$appPort"
 
+    // Advertised in the SYN-ACK. Without it the app falls back to RFC 1122's
+    // 536-byte default and sends us less than half an MTU per packet, which the
+    // datapath pays for in packet rate on every uploaded byte.
+    private val advertisedMss = (mtu - 40).coerceAtLeast(536)
+
     private val lock = Any()
     private var ourSeq = 1L // server → app sequence
     private var theirSeq = 0L // next byte expected from app
+    private var duplicateAcks = 0 // sent for the current hole; reset once it closes
     @Volatile private var established = false
     @Volatile private var closed = false
     private var socks: Socket? = null
@@ -64,7 +70,7 @@ class TcpConnection(
             synchronized(lock) {
                 socks = s
                 established = true
-                sendFlags(PacketBuilder.TcpFlag.SYN or PacketBuilder.TcpFlag.ACK)
+                sendFlags(PacketBuilder.TcpFlag.SYN or PacketBuilder.TcpFlag.ACK, mss = advertisedMss)
                 ourSeq = mask(ourSeq + 1) // our SYN consumes one
             }
             pumpUpstreamToTun(s)
@@ -81,6 +87,10 @@ class TcpConnection(
                     dstIp, appIp, dstPort, appPort,
                     seq = mask(ourSeq - 1), ack = theirSeq,
                     flags = PacketBuilder.TcpFlag.SYN or PacketBuilder.TcpFlag.ACK,
+                    // A retransmitted SYN-ACK must carry the option too: the app
+                    // only ever sees one of them, and whichever arrives decides
+                    // the segment size for the whole connection.
+                    mss = advertisedMss,
                 ),
             )
         }
@@ -92,11 +102,23 @@ class TcpConnection(
         val out = synchronized(lock) {
             if (!established || closed) return
             if (seq != theirSeq) {
-                // Retransmit / out-of-order: re-ACK what we have and drop.
-                Log.d(TAG, "[$tag] out-of-order seq=$seq expected=$theirSeq (${payload.size}B)")
-                sendFlags(PacketBuilder.TcpFlag.ACK)
+                // Out of order, and we keep no reassembly buffer, so the segment
+                // is dropped and the app has to resend from the hole.
+                //
+                // Only the first few get a duplicate ACK. Three is what triggers
+                // fast retransmit, and beyond that they are pure harm: one lost
+                // segment can be followed by a whole window of out-of-order ones,
+                // and ACKing each would put hundreds of extra writes through the
+                // tun lock exactly when it is already the bottleneck — which
+                // causes the drops that caused the hole.
+                duplicateAcks++
+                if (duplicateAcks <= MAX_DUPLICATE_ACKS) {
+                    Log.d(TAG, "[$tag] out-of-order seq=$seq expected=$theirSeq (${payload.size}B)")
+                    sendFlags(PacketBuilder.TcpFlag.ACK)
+                }
                 return
             }
+            duplicateAcks = 0
             theirSeq = mask(theirSeq + payload.size)
             socks?.getOutputStream()
         } ?: return
@@ -137,11 +159,14 @@ class TcpConnection(
                 synchronized(lock) {
                     if (closed) return
                     writeToTun(
+                        // buf is handed straight to the builder, which copies the
+                        // bytes into the packet it allocates — slicing it here
+                        // first would only add a second copy of every MSS.
                         PacketBuilder.ipv4Tcp(
                             dstIp, appIp, dstPort, appPort,
                             seq = ourSeq, ack = theirSeq,
                             flags = PacketBuilder.TcpFlag.PSH or PacketBuilder.TcpFlag.ACK,
-                            payload = buf.copyOf(n),
+                            payload = buf, payloadLength = n,
                         ),
                     )
                     ourSeq = mask(ourSeq + n)
@@ -155,8 +180,15 @@ class TcpConnection(
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "[$tag] upstream read failed after ${total}B", e)
-            synchronized(lock) { if (!closed) sendFlags(PacketBuilder.TcpFlag.RST or PacketBuilder.TcpFlag.ACK) }
+            // close() shuts this socket down, so the read losing it is the normal
+            // way a flow ends once the app has gone away — logging a stack trace
+            // at ERROR for every closed connection buried the real failures.
+            if (closed) {
+                Log.d(TAG, "[$tag] upstream closed after ${total}B")
+            } else {
+                Log.w(TAG, "[$tag] upstream read failed after ${total}B: ${e.message}")
+                synchronized(lock) { sendFlags(PacketBuilder.TcpFlag.RST or PacketBuilder.TcpFlag.ACK) }
+            }
         } finally {
             close()
         }
@@ -172,11 +204,12 @@ class TcpConnection(
     }
 
     /** Emits a server→app segment with the current seq/ack (no payload). */
-    private fun sendFlags(flags: Int, seqOverride: Long? = null) {
+    private fun sendFlags(flags: Int, seqOverride: Long? = null, mss: Int? = null) {
         writeToTun(
             PacketBuilder.ipv4Tcp(
                 dstIp, appIp, dstPort, appPort,
                 seq = seqOverride ?: ourSeq, ack = theirSeq, flags = flags,
+                mss = mss,
             ),
         )
     }
@@ -187,5 +220,6 @@ class TcpConnection(
         const val TAG = Tun2Socks.TAG
         const val SOCKS_CONNECT_TIMEOUT_MS = 8_000
         const val SOCKS_HANDSHAKE_TIMEOUT_MS = 10_000
+        const val MAX_DUPLICATE_ACKS = 3
     }
 }
