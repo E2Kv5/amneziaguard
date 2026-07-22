@@ -75,6 +75,7 @@ class Tun2Socks(
     private fun readLoop() {
         val buf = ByteArray(mtu + 200)
         Log.i(TAG, "read loop entered")
+        var idleReads = 0
         while (running) {
             val n = try {
                 tunIn.read(buf)
@@ -83,11 +84,24 @@ class Tun2Socks(
                 log("tun read failed: ${e.message}")
                 break
             }
-            if (n <= 0) {
-                Log.w(TAG, "tun read returned $n — leaving read loop")
-                log("tun read returned $n — read loop ended")
+            if (n == 0) {
+                // Zero means "no packet available right now" — the tun fd can be
+                // non-blocking. It is NOT end-of-stream; treating it as such kills
+                // the datapath after the very first idle moment.
+                idleReads++
+                try {
+                    Thread.sleep(IDLE_BACKOFF_MS)
+                } catch (_: InterruptedException) {
+                    break
+                }
+                continue
+            }
+            if (n < 0) {
+                Log.w(TAG, "tun read returned $n — end of stream, leaving read loop")
+                log("tun closed — read loop ended")
                 break
             }
+            idleReads = 0
             val count = packetsRead.incrementAndGet()
             val packet = IpPacket.parse(buf, n)
             if (packet == null) {
@@ -104,7 +118,8 @@ class Tun2Socks(
                 else -> droppedOther.incrementAndGet() // UDP/DNS in a later milestone
             }
         }
-        Log.i(TAG, "read loop exited (read=${packetsRead.get()})")
+        Log.i(TAG, "read loop exited (read=${packetsRead.get()}, idleReads=$idleReads, running=$running)")
+        if (running) log("WARNING: read loop ended while the engine was still running")
     }
 
     private fun handleTcp(packet: IpPacket) {
@@ -180,6 +195,7 @@ class Tun2Socks(
     companion object {
         const val TAG = "AGEngine"
         private const val LOG_FIRST = 40
+        private const val IDLE_BACKOFF_MS = 1L
         private val EMPTY = ByteArray(0)
 
         fun ip(addr: ByteArray): String =

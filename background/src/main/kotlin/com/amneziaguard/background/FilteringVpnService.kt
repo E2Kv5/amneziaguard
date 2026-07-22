@@ -164,8 +164,13 @@ class FilteringVpnService : VpnService() {
             .setSession("AmneziaGuard filter")
             .addAddress("10.111.0.2", 32)
             .addRoute("0.0.0.0", 0)
-            .addDnsServer("10.111.0.3")
+            // A real resolver: Android probes DNS-over-TLS (TCP:853) on the
+            // advertised server, which the TCP relay can actually carry. A
+            // made-up address would just dead-end every DNS attempt.
+            .addDnsServer("1.1.1.1")
             .setMtu(MTU)
+            // Ask for blocking reads; otherwise read() returns 0 when idle.
+            .setBlocking(true)
         runCatching { builder.addAllowedApplication(packageName) }
         return runCatching { builder.establish() }
             .onFailure { diagnostics.append("establish() threw: ${it.message}") }
