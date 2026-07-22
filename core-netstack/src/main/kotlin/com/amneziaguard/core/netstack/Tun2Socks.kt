@@ -1,5 +1,6 @@
 package com.amneziaguard.core.netstack
 
+import android.util.Log
 import com.amneziaguard.core.netstack.packet.FlowKey
 import com.amneziaguard.core.netstack.packet.IpPacket
 import com.amneziaguard.core.netstack.packet.IpProtocol
@@ -10,6 +11,7 @@ import com.amneziaguard.core.netstack.tcp.TcpConnection
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
@@ -18,7 +20,10 @@ import kotlin.concurrent.thread
  * through the local SOCKS5 (amneziawg-go). DROP flows are refused (TCP RST).
  *
  * First cut: IPv4 TCP. IPv6 and UDP/DNS are handled in a later milestone; for
- * now they are dropped. The heavy TCP logic lives in [TcpConnection].
+ * now they are counted and dropped.
+ *
+ * Everything is traced to logcat under [TAG] — the datapath can only be
+ * debugged from a device, so silence here is expensive.
  */
 class Tun2Socks(
     private val tunIn: InputStream,
@@ -34,9 +39,15 @@ class Tun2Socks(
     @Volatile private var running = false
     private var reader: Thread? = null
 
+    private val packetsRead = AtomicInteger()
+    private val packetsWritten = AtomicInteger()
+    private val droppedOther = AtomicInteger()
+
     fun start() {
         running = true
         reader = thread(name = "tun2socks", isDaemon = true) { readLoop() }
+        Log.i(TAG, "engine started (socksPort=$socksPort, mtu=$mtu)")
+        log("Engine started (SOCKS5 127.0.0.1:$socksPort)")
     }
 
     fun stop() {
@@ -44,29 +55,56 @@ class Tun2Socks(
         connections.values.forEach { runCatching { it.close() } }
         connections.clear()
         reader?.interrupt()
+        Log.i(TAG, "engine stopped (read=${packetsRead.get()} wrote=${packetsWritten.get()} otherDropped=${droppedOther.get()})")
+        log("Engine stopped: read ${packetsRead.get()} pkt, wrote ${packetsWritten.get()} pkt, non-TCP dropped ${droppedOther.get()}")
     }
 
     private fun writeToTun(packet: ByteArray) {
         synchronized(writeLock) {
-            runCatching {
+            try {
                 tunOut.write(packet)
                 tunOut.flush()
+                packetsWritten.incrementAndGet()
+            } catch (e: Exception) {
+                Log.e(TAG, "tun write failed (${packet.size}B)", e)
+                log("tun write failed: ${e.message}")
             }
         }
     }
 
     private fun readLoop() {
         val buf = ByteArray(mtu + 200)
+        Log.i(TAG, "read loop entered")
         while (running) {
-            val n = runCatching { tunIn.read(buf) }.getOrDefault(-1)
-            if (n <= 0) break
-            val packet = IpPacket.parse(buf, n) ?: continue
-            if (packet.version != 4) continue // IPv4 only for now
+            val n = try {
+                tunIn.read(buf)
+            } catch (e: Exception) {
+                Log.e(TAG, "tun read failed", e)
+                log("tun read failed: ${e.message}")
+                break
+            }
+            if (n <= 0) {
+                Log.w(TAG, "tun read returned $n — leaving read loop")
+                log("tun read returned $n — read loop ended")
+                break
+            }
+            val count = packetsRead.incrementAndGet()
+            val packet = IpPacket.parse(buf, n)
+            if (packet == null) {
+                if (count <= LOG_FIRST) Log.w(TAG, "unparseable packet, $n bytes")
+                continue
+            }
+            if (count <= LOG_FIRST) {
+                Log.d(TAG, "rx#$count v${packet.version} proto=${packet.protocol} " +
+                    "${ip(packet.sourceIp)}:${packet.sourcePort} → ${ip(packet.destIp)}:${packet.destPort} ${n}B")
+            }
+            if (packet.version != 4) { droppedOther.incrementAndGet(); continue }
             when (packet.protocol) {
                 IpProtocol.TCP -> handleTcp(packet)
-                else -> Unit // UDP/DNS + IPv6 in a later milestone
+                else -> droppedOther.incrementAndGet() // UDP/DNS in a later milestone
             }
         }
+        Log.i(TAG, "read loop exited (read=${packetsRead.get()})")
     }
 
     private fun handleTcp(packet: IpPacket) {
@@ -75,8 +113,11 @@ class Tun2Socks(
         val existing = connections[key]
 
         if (flags.syn && existing == null) {
-            when (policy(key)) {
-                RelayPolicy.DROP -> writeToTun(rstFor(key))
+            val decision = policy(key)
+            Log.i(TAG, "SYN ${ip(key.sourceIp)}:${key.sourcePort} → ${ip(key.destIp)}:${key.destPort} → $decision")
+            log("SYN → ${ip(key.destIp)}:${key.destPort} ($decision)")
+            when (decision) {
+                RelayPolicy.DROP -> writeToTun(rstFor(key, flags.sequenceNumber))
                 RelayPolicy.RELAY -> {
                     val conn = TcpConnection(
                         key = key,
@@ -85,6 +126,7 @@ class Tun2Socks(
                         mtu = mtu,
                         writeToTun = ::writeToTun,
                         onClosed = { connections.remove(it) },
+                        log = log,
                     )
                     connections[key] = conn
                     conn.onSyn(flags.sequenceNumber)
@@ -93,7 +135,20 @@ class Tun2Socks(
             return
         }
 
-        val conn = existing ?: return
+        val conn = existing
+        if (conn == null) {
+            // Traffic for a flow we don't know (e.g. after teardown): refuse it
+            // so the app fails fast instead of hanging.
+            if (!flags.rst) writeToTun(rstFor(key, flags.sequenceNumber))
+            return
+        }
+
+        if (flags.syn) {
+            // Retransmitted SYN — the app didn't see our SYN-ACK yet.
+            conn.onSynRetransmit()
+            return
+        }
+
         val payloadOffset = packet.transportOffset + flags.dataOffsetBytes
         val payloadLen = packet.totalLength - payloadOffset
         val payload = if (payloadLen > 0) {
@@ -113,15 +168,22 @@ class Tun2Socks(
         }
     }
 
-    /** RST+ACK for a refused SYN (server→app), acking the SYN. */
-    private fun rstFor(key: FlowKey): ByteArray =
+    /** RST+ACK refusing a SYN (server→app), acknowledging the SYN's sequence. */
+    private fun rstFor(key: FlowKey, seq: Long): ByteArray =
         PacketBuilder.ipv4Tcp(
             sourceIp = key.destIp, destIp = key.sourceIp,
             sourcePort = key.destPort, destPort = key.sourcePort,
-            seq = 0, ack = 1, flags = PacketBuilder.TcpFlag.RST or PacketBuilder.TcpFlag.ACK,
+            seq = 0, ack = (seq + 1) and 0xFFFFFFFFL,
+            flags = PacketBuilder.TcpFlag.RST or PacketBuilder.TcpFlag.ACK,
         )
 
-    private companion object {
-        val EMPTY = ByteArray(0)
+    companion object {
+        const val TAG = "AGEngine"
+        private const val LOG_FIRST = 40
+        private val EMPTY = ByteArray(0)
+
+        fun ip(addr: ByteArray): String =
+            if (addr.size == 4) addr.joinToString(".") { (it.toInt() and 0xFF).toString() }
+            else addr.joinToString("") { "%02x".format(it) }
     }
 }

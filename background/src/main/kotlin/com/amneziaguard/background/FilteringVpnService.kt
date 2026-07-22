@@ -131,7 +131,7 @@ class FilteringVpnService : VpnService() {
                 AmneziaProxyController.SOCKS_USER,
                 AmneziaProxyController.SOCKS_PASS,
             ),
-            mtu = 1280,
+            mtu = MTU,
             policy = { RelayPolicy.RELAY }, // relay everything for this test
             log = log,
         ).also { engine = it }
@@ -153,18 +153,23 @@ class FilteringVpnService : VpnService() {
         stopSelf()
     }
 
+    /**
+     * IPv4-only tun capturing just this app: amneziawg-go's UDP socket then has
+     * to be protect()'d to escape, and no other app is affected by the test.
+     * No ::/0 route — the engine has no IPv6 path yet, and capturing v6 without
+     * an address only creates a blackhole that muddies the test.
+     */
     private fun establishTun(): ParcelFileDescriptor? {
         val builder = Builder()
             .setSession("AmneziaGuard filter")
             .addAddress("10.111.0.2", 32)
             .addRoute("0.0.0.0", 0)
-            .addRoute("::", 0)
             .addDnsServer("10.111.0.3")
-            .setMtu(1280)
-        // Capture only our own package so amneziawg-go's UDP socket must be
-        // protect()'d to escape, and no other app is affected during the test.
+            .setMtu(MTU)
         runCatching { builder.addAllowedApplication(packageName) }
-        return runCatching { builder.establish() }.getOrNull()
+        return runCatching { builder.establish() }
+            .onFailure { diagnostics.append("establish() threw: ${it.message}") }
+            .getOrNull()
     }
 
     /** Reads and discards captured packets so the tun fd can't back up. */
@@ -200,5 +205,6 @@ class FilteringVpnService : VpnService() {
         const val ACTION_START = "com.amneziaguard.filter.START"
         const val ACTION_STOP = "com.amneziaguard.filter.STOP"
         const val ACTION_RELAY_TEST = "com.amneziaguard.filter.RELAY_TEST"
+        private const val MTU = 1280
     }
 }

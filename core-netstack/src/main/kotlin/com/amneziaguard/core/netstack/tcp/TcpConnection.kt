@@ -1,5 +1,7 @@
 package com.amneziaguard.core.netstack.tcp
 
+import android.util.Log
+import com.amneziaguard.core.netstack.Tun2Socks
 import com.amneziaguard.core.netstack.packet.FlowKey
 import com.amneziaguard.core.netstack.packet.PacketBuilder
 import com.amneziaguard.core.netstack.socks.Socks5Client
@@ -14,8 +16,7 @@ import kotlin.concurrent.thread
  * This is a pragmatic tun2socks TCP proxy, not a full stack: it assumes the tun
  * is in-order and lossless (true for a local VpnService tun), advertises a
  * fixed window, and ignores retransmission/SACK. Sequence numbers are tracked
- * mod 2^32. Good enough to carry real connections; edge cases get refined with
- * on-device iteration.
+ * mod 2^32.
  */
 class TcpConnection(
     private val key: FlowKey, // app → server perspective
@@ -24,11 +25,13 @@ class TcpConnection(
     private val mtu: Int,
     private val writeToTun: (ByteArray) -> Unit,
     private val onClosed: (FlowKey) -> Unit,
+    private val log: (String) -> Unit = {},
 ) {
     private val appIp = key.sourceIp
     private val appPort = key.sourcePort
     private val dstIp = key.destIp
     private val dstPort = key.destPort
+    private val tag = "${Tun2Socks.ip(dstIp)}:$dstPort/$appPort"
 
     private val lock = Any()
     private var ourSeq = 1L // server → app sequence
@@ -41,17 +44,23 @@ class TcpConnection(
     fun onSyn(synSeq: Long) {
         theirSeq = mask(synSeq + 1) // SYN consumes one sequence number
         thread(name = "tcp-$appPort", isDaemon = true) {
-            val s = runCatching {
+            val started = System.currentTimeMillis()
+            val s = try {
                 Socket().apply {
-                    connect(InetSocketAddress("127.0.0.1", socksPort), 8_000)
+                    // Bounded: a hung handshake must never wedge the flow.
+                    connect(InetSocketAddress("127.0.0.1", socksPort), SOCKS_CONNECT_TIMEOUT_MS)
+                    soTimeout = SOCKS_HANDSHAKE_TIMEOUT_MS
                     Socks5Client.connect(getInputStream(), getOutputStream(), dstIp, dstPort, credentials)
+                    soTimeout = 0 // unbounded once relaying
                 }
-            }.getOrNull()
-            if (s == null) {
+            } catch (e: Exception) {
+                Log.e(TAG, "[$tag] SOCKS5 connect failed after ${System.currentTimeMillis() - started}ms", e)
+                log("SOCKS5 connect failed ($tag): ${e.message}")
                 sendFlags(PacketBuilder.TcpFlag.RST or PacketBuilder.TcpFlag.ACK, seqOverride = 0)
                 onClosed(key)
                 return@thread
             }
+            Log.i(TAG, "[$tag] SOCKS5 established in ${System.currentTimeMillis() - started}ms; sending SYN-ACK")
             synchronized(lock) {
                 socks = s
                 established = true
@@ -62,24 +71,43 @@ class TcpConnection(
         }
     }
 
+    /** The app retransmitted its SYN: repeat the SYN-ACK if we already have one. */
+    fun onSynRetransmit() {
+        synchronized(lock) {
+            if (!established || closed) return
+            Log.d(TAG, "[$tag] SYN retransmit → resending SYN-ACK")
+            writeToTun(
+                PacketBuilder.ipv4Tcp(
+                    dstIp, appIp, dstPort, appPort,
+                    seq = mask(ourSeq - 1), ack = theirSeq,
+                    flags = PacketBuilder.TcpFlag.SYN or PacketBuilder.TcpFlag.ACK,
+                ),
+            )
+        }
+    }
+
     /** In-order payload from the app → forward to the upstream and ACK. */
     fun onData(seq: Long, payload: ByteArray) {
         if (payload.isEmpty()) return
         val out = synchronized(lock) {
-            if (!established) return
+            if (!established || closed) return
             if (seq != theirSeq) {
                 // Retransmit / out-of-order: re-ACK what we have and drop.
+                Log.d(TAG, "[$tag] out-of-order seq=$seq expected=$theirSeq (${payload.size}B)")
                 sendFlags(PacketBuilder.TcpFlag.ACK)
                 return
             }
             theirSeq = mask(theirSeq + payload.size)
             socks?.getOutputStream()
         } ?: return
-        runCatching {
+        try {
             out.write(payload)
             out.flush()
             synchronized(lock) { sendFlags(PacketBuilder.TcpFlag.ACK) }
-        }.onFailure { close() }
+        } catch (e: Exception) {
+            Log.e(TAG, "[$tag] upstream write failed", e)
+            close()
+        }
     }
 
     /** FIN from the app: ACK it and half-close the upstream. */
@@ -88,18 +116,24 @@ class TcpConnection(
             if (mask(seq) == theirSeq) theirSeq = mask(theirSeq + 1) // FIN consumes one
             sendFlags(PacketBuilder.TcpFlag.ACK)
         }
+        Log.d(TAG, "[$tag] app FIN")
         runCatching { socks?.shutdownOutput() }
     }
 
-    fun onRst() = close()
+    fun onRst() {
+        Log.d(TAG, "[$tag] app RST")
+        close()
+    }
 
     private fun pumpUpstreamToTun(s: Socket) {
         val buf = ByteArray((mtu - 40).coerceAtLeast(536))
         val input = runCatching { s.getInputStream() }.getOrNull() ?: return
+        var total = 0L
         try {
             while (true) {
                 val n = input.read(buf)
                 if (n < 0) break
+                total += n
                 synchronized(lock) {
                     if (closed) return
                     writeToTun(
@@ -113,15 +147,15 @@ class TcpConnection(
                     ourSeq = mask(ourSeq + n)
                 }
             }
-            // Upstream EOF → send FIN to the app.
+            Log.i(TAG, "[$tag] upstream EOF after ${total}B → FIN")
             synchronized(lock) {
                 if (!closed) {
                     sendFlags(PacketBuilder.TcpFlag.FIN or PacketBuilder.TcpFlag.ACK)
                     ourSeq = mask(ourSeq + 1)
                 }
             }
-        } catch (_: Exception) {
-            // Reset the app side on upstream error.
+        } catch (e: Exception) {
+            Log.e(TAG, "[$tag] upstream read failed after ${total}B", e)
             synchronized(lock) { if (!closed) sendFlags(PacketBuilder.TcpFlag.RST or PacketBuilder.TcpFlag.ACK) }
         } finally {
             close()
@@ -148,4 +182,10 @@ class TcpConnection(
     }
 
     private fun mask(v: Long): Long = v and 0xFFFFFFFFL
+
+    private companion object {
+        const val TAG = Tun2Socks.TAG
+        const val SOCKS_CONNECT_TIMEOUT_MS = 8_000
+        const val SOCKS_HANDSHAKE_TIMEOUT_MS = 10_000
+    }
 }
