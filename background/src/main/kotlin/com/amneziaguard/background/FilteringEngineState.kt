@@ -19,4 +19,13 @@ class FilteringEngineState @Inject constructor() {
     val isActive: Boolean get() = _state.value !is TunnelState.Down
 
     fun set(state: TunnelState) { _state.value = state }
+
+    /** Cumulative counters, so the UI can show throughput on this path too. */
+    data class Traffic(val downloadedBytes: Long, val uploadedBytes: Long)
+
+    @Volatile private var trafficSource: (() -> Traffic)? = null
+
+    fun setTrafficSource(source: (() -> Traffic)?) { trafficSource = source }
+
+    fun traffic(): Traffic? = trafficSource?.invoke()
 }

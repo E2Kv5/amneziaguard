@@ -8,6 +8,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import com.amneziaguard.core.data.model.AppMode
 import com.amneziaguard.core.data.repo.RuleRepository
+import com.amneziaguard.core.data.repo.ServerRepository
 import com.amneziaguard.core.data.settings.SettingsRepository
 import com.amneziaguard.core.firewall.FirewallPolicyCompiler
 import com.amneziaguard.core.firewall.UidPolicyResolver
@@ -25,6 +26,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.amnezia.awg.backend.SocketProtector
 import java.io.FileInputStream
@@ -52,11 +54,13 @@ class FilteringVpnService : VpnService() {
     @Inject lateinit var policyCompiler: FirewallPolicyCompiler
     @Inject lateinit var policyResolver: UidPolicyResolver
     @Inject lateinit var engineState: FilteringEngineState
+    @Inject lateinit var serverRepository: ServerRepository
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var tun: ParcelFileDescriptor? = null
     private var drain: Thread? = null
     @Volatile private var engine: Tun2Socks? = null
+    @Volatile private var notificationTitle: String = "AmneziaGuard"
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(Tun2Socks.TAG, "onStartCommand action=${intent?.action}")
@@ -168,7 +172,9 @@ class FilteringVpnService : VpnService() {
             diagnostics.finish(null); teardown(); stopSelf(); return
         }
         tun = fd
-        startForegroundNotice()
+        notificationTitle = serverRepository.serverName(settings.activeServerId ?: -1L)
+            ?.let { "AmneziaGuard · $it" } ?: "AmneziaGuard"
+        startForegroundNotice("Connecting…")
         log("Tun up; starting amneziawg-go bypass=1 + protect()…")
 
         proxyController.setProtector(SocketProtector { socketFd -> if (protect(socketFd)) 1 else 0 })
@@ -195,6 +201,13 @@ class FilteringVpnService : VpnService() {
             log = { /* per-flow noise stays in logcat only */ },
         ).also { engine = it }.start()
 
+        engine?.let { running ->
+            engineState.setTrafficSource {
+                FilteringEngineState.Traffic(running.downloadedBytes, running.uploadedBytes)
+            }
+        }
+        startNotificationUpdates()
+
         engineState.set(
             TunnelState.Up(
                 serverId = settings.activeServerId ?: -1L,
@@ -211,18 +224,54 @@ class FilteringVpnService : VpnService() {
         }
     }
 
-    private fun startForegroundNotice() {
-        val notification = TunnelNotifications.build(
-            this, "AmneziaGuard", "Firewall engine active (experimental)", showDisconnect = false,
-        )
+    private fun startForegroundNotice(text: String) {
+        val notification = notification(text)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
-                TunnelNotifications.NOTIFICATION_ID + 1,
+                TunnelNotifications.ENGINE_NOTIFICATION_ID,
                 notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
         } else {
-            startForeground(TunnelNotifications.NOTIFICATION_ID + 1, notification)
+            startForeground(TunnelNotifications.ENGINE_NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun notification(text: String) = TunnelNotifications.build(
+        context = this,
+        title = notificationTitle,
+        text = text,
+        disconnect = TunnelNotifications.disconnectEngine(this),
+    )
+
+    /**
+     * Keeps the ongoing notification honest: server name, that filtering is on,
+     * and the current speed — the same information the fast path shows, since
+     * from the user's side it is the same connection.
+     */
+    private fun startNotificationUpdates() {
+        scope.launch {
+            var lastDown = 0L
+            var lastUp = 0L
+            while (isActive) {
+                val traffic = engineState.traffic()
+                val text = if (traffic != null) {
+                    val down = (traffic.downloadedBytes - lastDown).coerceAtLeast(0) / SAMPLE_SECONDS
+                    val up = (traffic.uploadedBytes - lastUp).coerceAtLeast(0) / SAMPLE_SECONDS
+                    lastDown = traffic.downloadedBytes
+                    lastUp = traffic.uploadedBytes
+                    "Filtering · ↓ ${TunnelNotifications.formatRate(down)} " +
+                        "↑ ${TunnelNotifications.formatRate(up)}"
+                } else {
+                    "Filtering active"
+                }
+                TunnelNotifications.update(
+                    this@FilteringVpnService,
+                    TunnelNotifications.ENGINE_NOTIFICATION_ID,
+                    notification(text),
+                )
+                delay(SAMPLE_SECONDS * 1_000)
+            }
         }
     }
 
@@ -342,6 +391,7 @@ class FilteringVpnService : VpnService() {
     }
 
     private fun teardown() {
+        engineState.setTrafficSource(null)
         runCatching { engine?.stop() }
         engine = null
         runCatching { scope.launch { proxyController.stop() } }
@@ -374,5 +424,6 @@ class FilteringVpnService : VpnService() {
         const val ACTION_START_FIREWALL = "com.amneziaguard.filter.START_FIREWALL"
         private const val MTU = 1280
         private const val ROUTE_SETTLE_MS = 1_500L
+        private const val SAMPLE_SECONDS = 2L
     }
 }

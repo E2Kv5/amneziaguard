@@ -28,7 +28,10 @@ class TunnelForegroundService : LifecycleService() {
     override fun onCreate() {
         super.onCreate()
         startForegroundCompat(
-            TunnelNotifications.build(this, "AmneziaGuard", "Starting…", showDisconnect = true),
+            TunnelNotifications.build(
+                this, "AmneziaGuard", "Starting…",
+                disconnect = TunnelNotifications.disconnectFastPath(this),
+            ),
         )
         orchestrator.state
             .onEach { updateNotification(it) }
@@ -75,7 +78,12 @@ class TunnelForegroundService : LifecycleService() {
                 return
             }
         }
-        startForegroundCompat(TunnelNotifications.build(this, title, text, showDisconnect = true))
+        startForegroundCompat(
+            TunnelNotifications.build(
+                this, title, text,
+                disconnect = TunnelNotifications.disconnectFastPath(this),
+            ),
+        )
     }
 
     /**

@@ -75,7 +75,6 @@ fun FirewallScreen(
                         packageName = row.app.packageName,
                         mode = row.mode,
                         icon = remember(row.app.packageName) { viewModel.icon(row.app.packageName) },
-                        showRootBadge = row.mode == AppMode.BLOCK && !state.rootModeEnabled,
                         onModeChange = { viewModel.setMode(row.app.packageName, it) },
                     )
                 }
@@ -90,7 +89,6 @@ private fun AppRow(
     packageName: String,
     mode: AppMode,
     icon: android.graphics.drawable.Drawable?,
-    showRootBadge: Boolean,
     onModeChange: (AppMode) -> Unit,
 ) {
     Row(
@@ -113,13 +111,6 @@ private fun AppRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
             )
-            if (showRootBadge) {
-                Text(
-                    "Full block requires root",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
         }
         Spacer(Modifier.width(8.dp))
         TriStateAppToggle(

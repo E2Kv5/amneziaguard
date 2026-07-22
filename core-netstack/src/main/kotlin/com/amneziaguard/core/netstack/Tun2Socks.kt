@@ -14,6 +14,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
 /**
@@ -47,6 +48,14 @@ class Tun2Socks(
     private val packetsWritten = AtomicInteger()
     private val droppedOther = AtomicInteger()
 
+    // Counted at the tun boundary, so "download" is what we hand to the apps and
+    // "upload" is what they hand us — which is what a speed readout should show.
+    private val downloaded = AtomicLong()
+    private val uploaded = AtomicLong()
+
+    val downloadedBytes: Long get() = downloaded.get()
+    val uploadedBytes: Long get() = uploaded.get()
+
     fun start() {
         running = true
         reader = thread(name = "tun2socks", isDaemon = true) { readLoop() }
@@ -71,6 +80,7 @@ class Tun2Socks(
                 tunOut.write(packet)
                 tunOut.flush()
                 packetsWritten.incrementAndGet()
+                downloaded.addAndGet(packet.size.toLong())
             } catch (e: Exception) {
                 Log.e(TAG, "tun write failed (${packet.size}B)", e)
                 log("tun write failed: ${e.message}")
@@ -108,6 +118,7 @@ class Tun2Socks(
                 break
             }
             idleReads = 0
+            uploaded.addAndGet(n.toLong())
             val count = packetsRead.incrementAndGet()
             val packet = IpPacket.parse(buf, n)
             if (packet == null) {

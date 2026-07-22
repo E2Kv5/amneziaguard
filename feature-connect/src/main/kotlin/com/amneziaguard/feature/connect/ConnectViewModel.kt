@@ -41,8 +41,8 @@ class ConnectViewModel @Inject constructor(
     private val serverRepository: ServerRepository,
     private val settingsRepository: SettingsRepository,
     private val tunnelManager: TunnelManager,
+    private val engineState: FilteringEngineState,
     orchestrator: TunnelOrchestrator,
-    engineState: FilteringEngineState,
 ) : ViewModel() {
 
     val uiState: StateFlow<ConnectUiState> = combine(
@@ -82,14 +82,18 @@ class ConnectViewModel @Inject constructor(
         var lastRx = 0L
         var lastTx = 0L
         while (viewModelScope.isActive) {
-            val stats = tunnelManager.statistics()
-            if (stats == null) {
+            // Counters come from whichever datapath is carrying the traffic.
+            val totals = engineState.traffic()?.let { it.downloadedBytes to it.uploadedBytes }
+                ?: tunnelManager.statistics()?.let { it.totalRx() to it.totalTx() }
+
+            if (totals == null) {
                 _throughput.value = Throughput(0, 0, 0, 0)
                 lastRx = 0
                 lastTx = 0
             } else {
-                val rx = stats.totalRx()
-                val tx = stats.totalTx()
+                val (rx, tx) = totals
+                // A path switch resets the counters; treat a drop as a fresh start
+                // rather than reporting a negative rate.
                 val rxPerSec = (rx - lastRx).coerceAtLeast(0)
                 val txPerSec = (tx - lastTx).coerceAtLeast(0)
                 _throughput.value = Throughput(rx, tx, rxPerSec, txPerSec)
