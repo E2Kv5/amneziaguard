@@ -10,10 +10,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Shared log/result between [FilteringVpnService] and the diagnostics UI.
- * Every line is mirrored to logcat under the engine's tag so a single
- * `adb logcat -s AGEngine` capture explains the whole run — which probe was
- * started, how far it got and why it stopped.
+ * Shared log between [FilteringVpnService] and the diagnostics UI. Every line is
+ * mirrored to logcat under the engine's tag so a single `adb logcat -s AGEngine`
+ * capture explains the whole run — how far it got and why it stopped.
  */
 @Singleton
 class FilteringDiagnostics @Inject constructor() {
@@ -23,24 +22,42 @@ class FilteringDiagnostics @Inject constructor() {
     private val _running = MutableStateFlow(false)
     val running: StateFlow<Boolean> = _running.asStateFlow()
 
-    private val _exitIp = MutableStateFlow<String?>(null)
-    val exitIp: StateFlow<String?> = _exitIp.asStateFlow()
-
     fun reset(what: String) {
         Log.i(Tun2Socks.TAG, "=== $what ===")
         _log.value = listOf("— $what —")
-        _exitIp.value = null
         _running.value = true
     }
 
     fun append(line: String) {
         Log.i(Tun2Socks.TAG, line)
-        _log.update { it + line }
+        add(line)
     }
 
-    fun finish(ip: String?) {
-        Log.i(Tun2Socks.TAG, "finished, exitIp=$ip")
-        _exitIp.value = ip
+    /**
+     * Appends without mirroring to logcat, for lines the producer already logged
+     * there itself — the engine's periodic stats, which would otherwise appear
+     * twice in a capture.
+     */
+    fun appendQuiet(line: String) = add(line)
+
+    /**
+     * The engine runs for as long as the tunnel is up and reports every couple
+     * of seconds, so this list has to be bounded: unbounded it would grow without
+     * limit, and appending by copy would make that quadratic.
+     */
+    private fun add(line: String) {
+        _log.update { lines ->
+            if (lines.size < MAX_LINES) lines + line
+            else lines.subList(lines.size - MAX_LINES + 1, lines.size) + line
+        }
+    }
+
+    fun finish() {
+        Log.i(Tun2Socks.TAG, "engine stopped")
         _running.value = false
+    }
+
+    private companion object {
+        const val MAX_LINES = 300
     }
 }

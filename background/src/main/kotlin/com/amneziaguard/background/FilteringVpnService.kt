@@ -32,16 +32,11 @@ import org.amnezia.awg.backend.SocketProtector
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import javax.inject.Inject
-import kotlin.concurrent.thread
 
 /**
  * The userspace datapath: our own VpnService carrying app traffic through
  * amneziawg-go's SOCKS5 with per-app policy applied in between — which is what
  * finally makes the BLOCK mode work without root while the tunnel is up.
- *
- * It also hosts the two diagnostic probes that got it here (a protected spike
- * and a one-shot relay test), kept because they isolate the proxy plumbing from
- * the relay when something regresses.
  */
 @AndroidEntryPoint
 class FilteringVpnService : VpnService() {
@@ -58,28 +53,27 @@ class FilteringVpnService : VpnService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var tun: ParcelFileDescriptor? = null
-    private var drain: Thread? = null
     @Volatile private var engine: Tun2Socks? = null
     @Volatile private var notificationTitle: String = "AmneziaGuard"
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(Tun2Socks.TAG, "onStartCommand action=${intent?.action}")
         when (intent?.action) {
-            ACTION_STOP -> {
+            ACTION_START_FIREWALL -> scope.launch { guarded("firewall engine") { runFirewall() } }
+            // ACTION_STOP, and anything unrecognised: bringing the datapath down
+            // is the only safe response to a start we cannot interpret.
+            else -> {
                 teardown()
                 stopSelf()
             }
-            ACTION_START_FIREWALL -> scope.launch { guarded("firewall engine") { runFirewall() } }
-            ACTION_RELAY_TEST -> scope.launch { guarded("TCP relay test") { runRelayTest() } }
-            else -> scope.launch { guarded("protected spike") { runProtectedProbe() } }
         }
         return START_NOT_STICKY
     }
 
     /**
-     * Runs a probe so a thrown exception can't vanish into the coroutine scope:
-     * without this a failure before the first log line looks like "nothing
-     * happened", which is exactly the case that is hardest to diagnose remotely.
+     * Runs the engine so a thrown exception can't vanish into the coroutine
+     * scope: without this a failure before the first log line looks like
+     * "nothing happened", which is the hardest case to diagnose remotely.
      */
     private suspend fun guarded(what: String, body: suspend () -> Unit) {
         try {
@@ -87,53 +81,11 @@ class FilteringVpnService : VpnService() {
         } catch (e: Throwable) {
             Log.e(Tun2Socks.TAG, "$what crashed", e)
             diagnostics.append("$what crashed: ${e::class.java.simpleName}: ${e.message}")
-            diagnostics.finish(null)
+            diagnostics.finish()
             runCatching { proxyController.stop() }
             teardown()
             stopSelf()
         }
-    }
-
-    private suspend fun runProtectedProbe() {
-        val log: (String) -> Unit = { diagnostics.append(it) }
-        diagnostics.reset("protected spike (VpnService, bypass=1 + protect)")
-
-        val conf = configAssembler.activeServerConf()
-        if (conf == null) {
-            log("No active server / config.")
-            diagnostics.finish(null); teardown(); stopSelf(); return
-        }
-
-        val fd = establishTun()
-        if (fd == null) {
-            log("establish() returned null (VPN not authorized?).")
-            diagnostics.finish(null); teardown(); stopSelf(); return
-        }
-        tun = fd
-        startDrain(fd)
-        log("Tun up (this app captured); starting amneziawg-go bypass=1 + protect()…")
-
-        proxyController.setProtector(SocketProtector { socketFd -> if (protect(socketFd)) 1 else 0 })
-        val port = proxyController.start(conf, tunnelName = "awgfilter", bypass = 1).getOrElse {
-            log("Proxy failed to start: ${it.message}")
-            log("Details in logcat (AwgProxy / AmneziaWG).")
-            diagnostics.finish(null); teardown(); stopSelf(); return
-        }
-        log("SOCKS5 up on 127.0.0.1:$port; probing exit IP under active VPN…")
-
-        TraceProbe.awaitPort(port)
-        val ip = runCatching { TraceProbe.fetchExitIp(port, log) }
-            .getOrElse { log("Probe error: ${it.message}"); null }
-
-        runCatching { proxyController.stop() }
-        if (ip != null) {
-            log("SUCCESS — protected exit IP $ip (bypass=1 + protect() works under our VpnService).")
-        } else {
-            log("No exit IP — see log/logcat.")
-        }
-        diagnostics.finish(ip)
-        teardown()
-        stopSelf()
     }
 
     /**
@@ -154,7 +106,7 @@ class FilteringVpnService : VpnService() {
         if (conf == null) {
             log("No active server / config — pick one on the Servers screen first.")
             engineState.set(TunnelState.Error("no active server"))
-            diagnostics.finish(null); teardown(); stopSelf(); return
+            diagnostics.finish(); teardown(); stopSelf(); return
         }
 
         val settings = settingsRepository.settings.first()
@@ -169,7 +121,7 @@ class FilteringVpnService : VpnService() {
         if (fd == null) {
             log("establish() returned null (VPN not authorized?).")
             engineState.set(TunnelState.Error("VPN not authorized"))
-            diagnostics.finish(null); teardown(); stopSelf(); return
+            diagnostics.finish(); teardown(); stopSelf(); return
         }
         tun = fd
         notificationTitle = serverRepository.serverName(settings.activeServerId ?: -1L)
@@ -181,7 +133,7 @@ class FilteringVpnService : VpnService() {
         val port = proxyController.start(conf, tunnelName = "awgfw", bypass = 1).getOrElse {
             log("Proxy failed to start: ${it.message}")
             engineState.set(TunnelState.Error(it.message ?: "proxy failed"))
-            diagnostics.finish(null); teardown(); stopSelf(); return
+            diagnostics.finish(); teardown(); stopSelf(); return
         }
         TraceProbe.awaitPort(port)
         log("SOCKS5 up on 127.0.0.1:$port; engine running — traffic is now filtered.")
@@ -199,6 +151,10 @@ class FilteringVpnService : VpnService() {
                 if (policyResolver.modeFor(flow) == AppMode.BLOCK) RelayPolicy.DROP else RelayPolicy.RELAY
             },
             log = { /* per-flow noise stays in logcat only */ },
+            // One line every two seconds, which is what a speedtest run from
+            // another app gets measured against: rate, packet rate, the cost of
+            // a tun write and the live connection count.
+            stats = { diagnostics.appendQuiet(it) },
         ).also { engine = it }.start()
 
         engine?.let { running ->
@@ -276,81 +232,8 @@ class FilteringVpnService : VpnService() {
     }
 
     /**
-     * Milestone 2: exercise the tun2socks TCP relay. Capture this app, start
-     * amneziawg-go (bypass=1 + protect), run the engine, then open a *real*
-     * socket to 1.1.1.1:443 — it flows tun → engine → SOCKS5 → tunnel. A
-     * VPN-server exit IP proves the relay carries a real TCP+TLS connection.
-     */
-    private suspend fun runRelayTest() {
-        val log: (String) -> Unit = { diagnostics.append(it) }
-        diagnostics.reset("TCP relay test (tun2socks)")
-
-        val conf = configAssembler.activeServerConf()
-        if (conf == null) {
-            log("No active server / config."); diagnostics.finish(null); teardown(); stopSelf(); return
-        }
-        val fd = establishTun()
-        if (fd == null) {
-            log("establish() returned null (VPN not authorized?)."); diagnostics.finish(null); teardown(); stopSelf(); return
-        }
-        tun = fd
-        log("Tun up (this app captured); starting amneziawg-go bypass=1 + protect()…")
-
-        proxyController.setProtector(SocketProtector { socketFd -> if (protect(socketFd)) 1 else 0 })
-        val port = proxyController.start(conf, tunnelName = "awgrelay", bypass = 1).getOrElse {
-            log("Proxy failed to start: ${it.message}"); diagnostics.finish(null); teardown(); stopSelf(); return
-        }
-        TraceProbe.awaitPort(port)
-        log("SOCKS5 up on 127.0.0.1:$port; starting tun2socks relay…")
-
-        val relay = Tun2Socks(
-            tunIn = FileInputStream(fd.fileDescriptor),
-            tunOut = FileOutputStream(fd.fileDescriptor),
-            socksPort = port,
-            credentials = Socks5Client.Credentials(
-                AmneziaProxyController.SOCKS_USER,
-                AmneziaProxyController.SOCKS_PASS,
-            ),
-            mtu = MTU,
-            policy = { RelayPolicy.RELAY }, // relay everything for this test
-            log = log,
-        ).also { engine = it }
-        relay.start()
-
-        // The VPN's per-UID routing rules land a moment after establish(); a
-        // socket opened too early sends its SYN over the underlying network and
-        // only its later packets get captured — a half-open flow the engine can
-        // never serve. Let routing settle, and retry once if we still race it.
-        log("Letting VPN routing settle…")
-        delay(ROUTE_SETTLE_MS)
-
-        log("Probing exit IP through the relay…")
-        var ip = runCatching { TraceProbe.fetchExitIpDirect(log) }
-            .getOrElse { log("Probe error: ${it.message}"); null }
-        if (ip == null) {
-            log("Retrying the probe with a fresh socket…")
-            delay(ROUTE_SETTLE_MS)
-            ip = runCatching { TraceProbe.fetchExitIpDirect(log) }
-                .getOrElse { log("Retry error: ${it.message}"); null }
-        }
-
-        runCatching { relay.stop() }
-        runCatching { proxyController.stop() }
-        if (ip != null) {
-            log("SUCCESS — TCP relay works, exit IP $ip.")
-        } else {
-            log("No exit IP — relay likely incomplete; see logcat.")
-        }
-        diagnostics.finish(ip)
-        teardown()
-        stopSelf()
-    }
-
-    /**
-     * IPv4-only tun capturing just this app: amneziawg-go's UDP socket then has
-     * to be protect()'d to escape, and no other app is affected by the test.
-     * No ::/0 route — the engine has no IPv6 path yet, and capturing v6 without
-     * an address only creates a blackhole that muddies the test.
+     * The captured tun. No ::/0 route — the engine has no IPv6 path yet, and
+     * capturing v6 without an address only creates a blackhole.
      */
     private fun establishTun(
         included: Set<String> = setOf(packageName),
@@ -376,27 +259,11 @@ class FilteringVpnService : VpnService() {
             .getOrNull()
     }
 
-    /** Reads and discards captured packets so the tun fd can't back up. */
-    private fun startDrain(fd: ParcelFileDescriptor) {
-        drain = thread(name = "filter-drain", isDaemon = true) {
-            val input = FileInputStream(fd.fileDescriptor)
-            val buf = ByteArray(32_767)
-            try {
-                while (!Thread.currentThread().isInterrupted) {
-                    if (input.read(buf) < 0) break
-                }
-            } catch (_: Exception) {
-            }
-        }
-    }
-
     private fun teardown() {
         engineState.setTrafficSource(null)
         runCatching { engine?.stop() }
         engine = null
         runCatching { scope.launch { proxyController.stop() } }
-        drain?.interrupt()
-        drain = null
         runCatching { tun?.close() }
         tun = null
     }
@@ -418,12 +285,9 @@ class FilteringVpnService : VpnService() {
     }
 
     companion object {
-        const val ACTION_START = "com.amneziaguard.filter.START"
         const val ACTION_STOP = "com.amneziaguard.filter.STOP"
-        const val ACTION_RELAY_TEST = "com.amneziaguard.filter.RELAY_TEST"
         const val ACTION_START_FIREWALL = "com.amneziaguard.filter.START_FIREWALL"
         private const val MTU = 1280
-        private const val ROUTE_SETTLE_MS = 1_500L
         private const val SAMPLE_SECONDS = 2L
     }
 }
