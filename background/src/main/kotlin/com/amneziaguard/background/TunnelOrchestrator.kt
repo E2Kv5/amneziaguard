@@ -15,12 +15,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -41,10 +43,21 @@ class TunnelOrchestrator @Inject constructor(
     private val policyCompiler: FirewallPolicyCompiler,
     private val firewallEnforcer: FirewallEnforcer,
     private val leakCheckScheduler: LeakCheckScheduler,
+    private val engineState: FilteringEngineState,
 ) {
     private val scope = CoroutineScope(SupervisorJob())
 
-    val state: StateFlow<TunnelState> = tunnelManager.state
+    /**
+     * The tunnel's state regardless of which datapath carries it: only one of
+     * the two ever runs (see [TunnelController]), so whichever isn't Down is the
+     * live one.
+     */
+    val state: StateFlow<TunnelState> = combine(
+        tunnelManager.state,
+        engineState.state,
+    ) { fastPath, engine ->
+        if (engine !is TunnelState.Down) engine else fastPath
+    }.stateIn(scope, SharingStarted.Eagerly, TunnelState.Down)
 
     /** The server the user wants connected; null means "stay disconnected". */
     @Volatile private var desiredServerId: Long? = null
@@ -103,6 +116,10 @@ class TunnelOrchestrator @Inject constructor(
                         blockWhenDisconnected = settings.blockWhenDisconnected,
                     ),
                 )
+
+                // The engine owns its own lifetime and applies rule edits live,
+                // so the fast path's rebuild/reconnect machinery must keep away.
+                if (engineState.isActive) return@onEach
 
                 when {
                     tunnel is TunnelState.Up -> {

@@ -17,6 +17,7 @@ import com.amneziaguard.core.netstack.socks.Socks5Client
 import com.amneziaguard.core.tunnel.AmneziaProxyController
 import com.amneziaguard.core.tunnel.ServerConfigAssembler
 import com.amneziaguard.core.tunnel.TraceProbe
+import com.amneziaguard.core.tunnel.TunnelState
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,7 @@ class FilteringVpnService : VpnService() {
     @Inject lateinit var settingsRepository: SettingsRepository
     @Inject lateinit var policyCompiler: FirewallPolicyCompiler
     @Inject lateinit var policyResolver: UidPolicyResolver
+    @Inject lateinit var engineState: FilteringEngineState
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     @Volatile private var tun: ParcelFileDescriptor? = null
@@ -142,10 +144,12 @@ class FilteringVpnService : VpnService() {
     private suspend fun runFirewall() {
         val log: (String) -> Unit = { diagnostics.append(it) }
         diagnostics.reset("no-root firewall engine")
+        engineState.set(TunnelState.Connecting)
 
         val conf = configAssembler.activeServerConf()
         if (conf == null) {
             log("No active server / config — pick one on the Servers screen first.")
+            engineState.set(TunnelState.Error("no active server"))
             diagnostics.finish(null); teardown(); stopSelf(); return
         }
 
@@ -160,6 +164,7 @@ class FilteringVpnService : VpnService() {
         val fd = establishTun(appPolicy.included, appPolicy.excluded)
         if (fd == null) {
             log("establish() returned null (VPN not authorized?).")
+            engineState.set(TunnelState.Error("VPN not authorized"))
             diagnostics.finish(null); teardown(); stopSelf(); return
         }
         tun = fd
@@ -169,6 +174,7 @@ class FilteringVpnService : VpnService() {
         proxyController.setProtector(SocketProtector { socketFd -> if (protect(socketFd)) 1 else 0 })
         val port = proxyController.start(conf, tunnelName = "awgfw", bypass = 1).getOrElse {
             log("Proxy failed to start: ${it.message}")
+            engineState.set(TunnelState.Error(it.message ?: "proxy failed"))
             diagnostics.finish(null); teardown(); stopSelf(); return
         }
         TraceProbe.awaitPort(port)
@@ -188,6 +194,13 @@ class FilteringVpnService : VpnService() {
             },
             log = { /* per-flow noise stays in logcat only */ },
         ).also { engine = it }.start()
+
+        engineState.set(
+            TunnelState.Up(
+                serverId = settings.activeServerId ?: -1L,
+                sinceEpochMs = System.currentTimeMillis(),
+            ),
+        )
 
         // Rule edits take effect without restarting the tunnel; only a change to
         // the include/exclude split would need a new tun, which is a restart.
@@ -338,7 +351,17 @@ class FilteringVpnService : VpnService() {
         tun = null
     }
 
+    /** Another VPN took over: the datapath is gone, so say so rather than lying. */
+    override fun onRevoke() {
+        Log.i(Tun2Socks.TAG, "VPN revoked — tearing the engine down")
+        engineState.set(TunnelState.Down)
+        teardown()
+        stopSelf()
+        super.onRevoke()
+    }
+
     override fun onDestroy() {
+        engineState.set(TunnelState.Down)
         teardown()
         scope.cancel()
         super.onDestroy()

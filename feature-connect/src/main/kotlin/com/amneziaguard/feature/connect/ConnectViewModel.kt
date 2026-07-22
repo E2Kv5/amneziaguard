@@ -2,6 +2,7 @@ package com.amneziaguard.feature.connect
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.amneziaguard.background.FilteringEngineState
 import com.amneziaguard.background.TunnelController
 import com.amneziaguard.background.TunnelOrchestrator
 import com.amneziaguard.core.data.model.Server
@@ -27,6 +28,8 @@ data class ConnectUiState(
     val tunnel: TunnelState,
     val servers: List<Server>,
     val activeServerId: Long?,
+    /** True when the userspace engine carries the traffic (per-app blocking active). */
+    val filtering: Boolean = false,
 ) {
     val activeServer: Server? get() = servers.firstOrNull { it.id == activeServerId }
     val hasServers: Boolean get() = servers.isNotEmpty()
@@ -39,14 +42,21 @@ class ConnectViewModel @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val tunnelManager: TunnelManager,
     orchestrator: TunnelOrchestrator,
+    engineState: FilteringEngineState,
 ) : ViewModel() {
 
     val uiState: StateFlow<ConnectUiState> = combine(
         orchestrator.state,
         serverRepository.observeServers(),
         settingsRepository.settings,
-    ) { tunnel, servers, settings ->
-        ConnectUiState(tunnel, servers, settings.activeServerId)
+        engineState.state,
+    ) { tunnel, servers, settings, engine ->
+        ConnectUiState(
+            tunnel = tunnel,
+            servers = servers,
+            activeServerId = settings.activeServerId,
+            filtering = engine !is TunnelState.Down,
+        )
     }.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),

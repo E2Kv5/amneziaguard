@@ -108,6 +108,19 @@ fun ConnectScreen(
         )
 
         if (active) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = if (state.filtering) {
+                    "Per-app filtering engine"
+                } else {
+                    "Fast tunnel"
+                },
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+
+        if (active) {
             Spacer(Modifier.height(24.dp))
             ThroughputCard(rxPerSec = throughput.rxPerSec, txPerSec = throughput.txPerSec)
         }
