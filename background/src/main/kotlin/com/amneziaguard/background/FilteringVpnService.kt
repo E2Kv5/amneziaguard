@@ -3,6 +3,7 @@ package com.amneziaguard.background
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import com.amneziaguard.core.netstack.RelayPolicy
 import com.amneziaguard.core.netstack.Tun2Socks
 import com.amneziaguard.core.netstack.socks.Socks5Client
@@ -42,20 +43,39 @@ class FilteringVpnService : VpnService() {
     @Volatile private var engine: Tun2Socks? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.i(Tun2Socks.TAG, "onStartCommand action=${intent?.action}")
         when (intent?.action) {
             ACTION_STOP -> {
                 teardown()
                 stopSelf()
             }
-            ACTION_RELAY_TEST -> scope.launch { runRelayTest() }
-            else -> scope.launch { runProtectedProbe() }
+            ACTION_RELAY_TEST -> scope.launch { guarded("TCP relay test") { runRelayTest() } }
+            else -> scope.launch { guarded("protected spike") { runProtectedProbe() } }
         }
         return START_NOT_STICKY
     }
 
+    /**
+     * Runs a probe so a thrown exception can't vanish into the coroutine scope:
+     * without this a failure before the first log line looks like "nothing
+     * happened", which is exactly the case that is hardest to diagnose remotely.
+     */
+    private suspend fun guarded(what: String, body: suspend () -> Unit) {
+        try {
+            body()
+        } catch (e: Throwable) {
+            Log.e(Tun2Socks.TAG, "$what crashed", e)
+            diagnostics.append("$what crashed: ${e::class.java.simpleName}: ${e.message}")
+            diagnostics.finish(null)
+            runCatching { proxyController.stop() }
+            teardown()
+            stopSelf()
+        }
+    }
+
     private suspend fun runProtectedProbe() {
         val log: (String) -> Unit = { diagnostics.append(it) }
-        diagnostics.reset()
+        diagnostics.reset("protected spike (VpnService, bypass=1 + protect)")
 
         val conf = configAssembler.activeServerConf()
         if (conf == null) {
@@ -103,7 +123,7 @@ class FilteringVpnService : VpnService() {
      */
     private suspend fun runRelayTest() {
         val log: (String) -> Unit = { diagnostics.append(it) }
-        diagnostics.reset()
+        diagnostics.reset("TCP relay test (tun2socks)")
 
         val conf = configAssembler.activeServerConf()
         if (conf == null) {

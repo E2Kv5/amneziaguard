@@ -82,7 +82,7 @@ fun SpikeScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(12.dp))
-        Button(onClick = viewModel::run, enabled = !state.running) { Text("Run plain spike") }
+        OutlinedButton(onClick = viewModel::run, enabled = !state.running) { Text("Run plain spike") }
         state.exitIp?.let {
             Spacer(Modifier.height(8.dp))
             Text("Exit IP: $it", style = MaterialTheme.typography.titleMedium)
@@ -120,7 +120,9 @@ fun SpikeScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = { launchRelayTest() }, enabled = !filteringRunning) {
+        // The primary probe while the engine is under development — filled so it
+        // can't be confused with the two spikes above it.
+        Button(onClick = { launchRelayTest() }, enabled = !filteringRunning) {
             Text("Run TCP relay test")
         }
 
