@@ -171,19 +171,14 @@ class Socks5UdpRelay(
                 lastUsed = System.currentTimeMillis()
                 val reply = decode(buf, packet.length) ?: continue
                 val (originIp, originPort, data) = reply
-                // The synthesized packet has to fit the tun; oversized replies
-                // would need IP fragmentation, so drop them loudly instead.
-                if (data.size > mtu - IP_UDP_OVERHEAD) {
-                    Log.w(TAG, "udp reply ${data.size}B exceeds MTU for $key — dropped")
-                    continue
-                }
-                writeToTun(
-                    PacketBuilder.ipv4Udp(
-                        sourceIp = originIp, destIp = appIp,
-                        sourcePort = originPort, destPort = appPort,
-                        payload = data,
-                    ),
-                )
+                // Origins size their datagrams to the server's path, not our tun,
+                // so a reply can exceed the tun MTU; the builder fragments those
+                // and the app reassembles, rather than us dropping QUIC replies.
+                PacketBuilder.ipv4UdpFragments(
+                    sourceIp = originIp, destIp = appIp,
+                    sourcePort = originPort, destPort = appPort,
+                    payload = data, mtu = mtu,
+                ).forEach(writeToTun)
             }
         }
 
@@ -218,7 +213,6 @@ class Socks5UdpRelay(
         const val ATYP_IPV6 = 0x04
         const val CONNECT_TIMEOUT_MS = 5_000
         const val MAX_DATAGRAM = 32_768
-        const val IP_UDP_OVERHEAD = 28
         const val IDLE_TIMEOUT_MS = 60_000L
     }
 }

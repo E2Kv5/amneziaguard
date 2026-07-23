@@ -124,6 +124,62 @@ class PacketBuilderTest {
     }
 
     @Test
+    fun `udp datagram that fits the mtu is a single unfragmented packet`() {
+        val payload = ByteArray(1000) { it.toByte() }
+        val fragments = PacketBuilder.ipv4UdpFragments(src, dst, 53, 40000, payload, mtu = 1280)
+        assertEquals(1, fragments.size)
+        val parsed = IpPacket.parse(fragments[0])!!
+        assertEquals(IpProtocol.UDP, parsed.protocol)
+        assertEquals(53, parsed.sourcePort)
+        assertEquals(40000, parsed.destPort)
+        // More-fragments clear and offset zero: nothing to reassemble.
+        assertEquals(0, fragmentFlagsAndOffset(fragments[0]) and 0x3FFF)
+        assertEquals(0xFFFF, foldOnesComplement(fragments[0], 0, 20))
+        assertEquals(0, Checksums.transport(src, dst, IpProtocol.UDP, fragments[0], 20, parsed.totalLength - 20))
+    }
+
+    @Test
+    fun `oversized udp datagram fragments and reassembles to the original`() {
+        val payload = ByteArray(3000) { (it * 7).toByte() }
+        val mtu = 1280
+        val fragments = PacketBuilder.ipv4UdpFragments(src, dst, 443, 51000, payload, mtu)
+        assertTrue("expected multiple fragments", fragments.size > 1)
+
+        val id = identification(fragments[0])
+        var expectedOffset = 0
+        val reassembled = ArrayList<Byte>()
+        fragments.forEachIndexed { i, frag ->
+            assertTrue("fragment ${frag.size}B exceeds mtu", frag.size <= mtu)
+            assertEquals("all fragments share one id", id, identification(frag))
+            val flags = fragmentFlagsAndOffset(frag)
+            assertEquals("offset in 8-byte units", expectedOffset / 8, flags and 0x1FFF)
+            val last = i == fragments.lastIndex
+            assertEquals("more-fragments set on all but last", if (last) 0 else 0x2000, flags and 0x2000)
+            // Non-last fragments must carry a multiple of 8 payload bytes.
+            val ipPayload = frag.copyOfRange(20, frag.size)
+            if (!last) assertEquals(0, ipPayload.size % 8)
+            reassembled.addAll(ipPayload.toList())
+            expectedOffset += ipPayload.size
+            assertEquals(0xFFFF, foldOnesComplement(frag, 0, 20)) // each IP header valid
+        }
+
+        // The reassembled IP payload is the whole UDP datagram: header + payload.
+        val datagram = reassembled.toByteArray()
+        assertEquals(8 + payload.size, datagram.size)
+        assertEquals(443, ((datagram[0].toInt() and 0xFF) shl 8) or (datagram[1].toInt() and 0xFF))
+        assertEquals(51000, ((datagram[2].toInt() and 0xFF) shl 8) or (datagram[3].toInt() and 0xFF))
+        assertArrayEquals(payload, datagram.copyOfRange(8, datagram.size))
+        // Checksum over the reassembled datagram verifies against the pseudo-header.
+        assertEquals(0, Checksums.transport(src, dst, IpProtocol.UDP, datagram, 0, datagram.size))
+    }
+
+    private fun identification(packet: ByteArray): Int =
+        ((packet[4].toInt() and 0xFF) shl 8) or (packet[5].toInt() and 0xFF)
+
+    private fun fragmentFlagsAndOffset(packet: ByteArray): Int =
+        ((packet[6].toInt() and 0xFF) shl 8) or (packet[7].toInt() and 0xFF)
+
+    @Test
     fun `rst segment has no payload and correct flag`() {
         val packet = PacketBuilder.ipv4Tcp(
             src, dst, 80, 12345, seq = 0, ack = 1,
