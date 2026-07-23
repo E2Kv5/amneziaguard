@@ -103,10 +103,11 @@ class UidPolicyResolver @Inject constructor(
     private companion object {
         const val TAG = "AGEngine"
 
-        // One second still collapses a QUIC flow's thousands of datagrams per
-        // second into a single lookup, while keeping the window in which a
-        // recycled source port could be attributed to its previous owner short.
-        const val UID_TTL_MS = 1_000L
+        // A quarter second still collapses a QUIC flow's thousands of datagrams
+        // per second into a handful of lookups, while keeping short the window in
+        // which a recycled 5-tuple could be attributed to its previous owner —
+        // the one authorisation-relevant cost of caching in a firewall.
+        const val UID_TTL_MS = 250L
         const val MAX_CACHED_FLOWS = 4_096
     }
 }
